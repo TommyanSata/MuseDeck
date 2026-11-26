@@ -5,6 +5,8 @@ import {
   BookMarked,
   Check,
   CheckCircle2,
+  ChevronDown,
+  ChevronRight,
   Copy,
   Download,
   ExternalLink,
@@ -81,6 +83,7 @@ export const MuseChatView: React.FC<MuseChatViewProps> = ({
   const [addingQuestion, setAddingQuestion] = useState(false);
   const [newQuestionText, setNewQuestionText] = useState('');
   const [showResolvedQuestions, setShowResolvedQuestions] = useState(false);
+  const [expandedCapsules, setExpandedCapsules] = useState<Record<number, boolean>>({});
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -599,10 +602,95 @@ export const MuseChatView: React.FC<MuseChatViewProps> = ({
                       </>
                     );
 
+                    const rawMsgText = (m.text || '').trim();
+                    const hasMediaOrActions = Boolean(
+                      (m.images && m.images.length > 0) ||
+                        (m.videos && m.videos.length > 0) ||
+                        (m.audios && m.audios.length > 0) ||
+                        (m.actions && m.actions.length > 0) ||
+                        m.hasInteractiveCard
+                    );
+
+                    // Detect automated system envelopes so they fold into a clean 1-line capsule
+                    let systemCapsuleLabel = '';
+                    if (m.role === 'user') {
+                      if (
+                        /^【(?:MuseDeck|FMC)\s*调度协议/i.test(rawMsgText) ||
+                        rawMsgText.includes('# MuseDeck 本地多智能体调度协议') ||
+                        rawMsgText.includes('# FMC 本地多智能体调度协议') ||
+                        rawMsgText.startsWith('【首次连通与站点访问权限预检】')
+                      ) {
+                        const revM = rawMsgText.match(/Rev\s*#(\d+)/i);
+                        systemCapsuleLabel = `⚡ 已静默同步调度协议与接口凭证${revM ? ` (Rev #${revM[1]})` : ''}`;
+                      } else if (/^【(?:FMC\s*)?工作流自动回执/.test(rawMsgText)) {
+                        const roundM = rawMsgText.match(/第\s*\d+\/\d+\s*轮完成/);
+                        systemCapsuleLabel = `📦 已向 Muse 静默回传本地 CLI 执行结果与 Diff${roundM ? ` · ${roundM[0]}` : ''}`;
+                      } else if (rawMsgText.startsWith('【用户已批准项目归属】')) {
+                        systemCapsuleLabel = '✅ 已向 Muse 同步确认项目归属';
+                      } else if (rawMsgText.startsWith('【用户已批准执行方案】')) {
+                        systemCapsuleLabel = '✅ 已向 Muse 同步批准执行方案';
+                      }
+                    } else if (
+                      m.role === 'muse' &&
+                      !hasMediaOrActions &&
+                      /^Rev\s*#\d+\s*(?:已覆盖|已更新|记下了)/i.test(rawMsgText) &&
+                      rawMsgText.length < 360
+                    ) {
+                      const revM = rawMsgText.match(/Rev\s*#(\d+)/i);
+                      systemCapsuleLabel = `✓ Muse 已静默更新协议记忆${revM ? ` (Rev #${revM[1]})` : ''}`;
+                    }
+
+                    if (systemCapsuleLabel) {
+                      const isExpanded = Boolean(expandedCapsules[i]);
+                      return (
+                        <div key={i} className="my-1 flex flex-col items-center">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setExpandedCapsules((prev) => ({ ...prev, [i]: !prev[i] }))
+                            }
+                            className="inline-flex items-center gap-1.5 rounded-full border border-[#eaecef] bg-[#fafafa] px-3 py-1 text-[11px] font-medium text-[#71717a] transition-colors hover:border-[#d4d4d8] hover:text-[#111827]"
+                          >
+                            <span>{systemCapsuleLabel}</span>
+                            {m.time && <span className="font-mono text-[10px] text-[#a1a1aa]">· {m.time}</span>}
+                            {isExpanded ? (
+                              <ChevronDown className="h-3 w-3 text-[#a1a1aa]" />
+                            ) : (
+                              <ChevronRight className="h-3 w-3 text-[#a1a1aa]" />
+                            )}
+                          </button>
+                          {isExpanded && (
+                            <div className="mt-2 max-h-64 w-full max-w-[88%] overflow-y-auto whitespace-pre-wrap break-words rounded-xl border border-[#eaecef] bg-[#fafafa] px-3.5 py-2.5 font-mono text-[11px] leading-relaxed text-[#52525b]">
+                              {rawMsgText}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    }
+
+                    // Strip hidden system instruction suffix on Feishu-forwarded user prompts so only clean user text shows
+                    let displayUserText = m.text || '';
+                    let fromFeishuBadge = false;
+                    if (
+                      m.role === 'user' &&
+                      /^【来自手机飞书的(?:新需求|消息)】/.test(displayUserText)
+                    ) {
+                      fromFeishuBadge = true;
+                      displayUserText = displayUserText
+                        .replace(/^【来自手机飞书的(?:新需求|消息)】/, '')
+                        .replace(/\n（(?:请先调用|若这是联网查资料)[\s\S]*$/, '')
+                        .trim();
+                    }
+
                     return m.role === 'user' ? (
                       <div key={i} className="flex items-start justify-end gap-2.5">
                         <div className="flex max-w-[76%] flex-col items-end gap-1">
                           <div className="flex items-center gap-1.5 px-1 text-[11px] text-[#8a8f98]">
+                            {fromFeishuBadge && (
+                              <span className="rounded bg-[#f4f4f5] px-1.5 py-0.5 text-[10px] font-medium text-[#52525b]">
+                                手机飞书
+                              </span>
+                            )}
                             <span className="font-medium text-[#71717a]">你</span>
                             {m.time && (
                               <>
@@ -612,7 +700,7 @@ export const MuseChatView: React.FC<MuseChatViewProps> = ({
                             )}
                           </div>
                           <div className="whitespace-pre-wrap break-words rounded-2xl rounded-tr-md bg-[#f4f4f5] px-4 py-2.5 text-[13.5px] leading-relaxed text-[#111827]">
-                            {m.text && <div>{m.text}</div>}
+                            {displayUserText && <div>{displayUserText}</div>}
                             {renderRichMedia()}
                           </div>
                         </div>

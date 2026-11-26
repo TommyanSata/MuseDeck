@@ -644,6 +644,17 @@ async function syncLatestBriefToMuse(force = false): Promise<{ ok: boolean; mess
   if (!force && st.controlApi.autoSyncToMuse === false) {
     return { ok: false, message: '已关闭自动同步' };
   }
+  const baseUrl = st.controlApi.tunnelUrl.trim() || `http://127.0.0.1:${st.controlApi.port}`;
+  const endpointSig = `${baseUrl}|${st.controlApi.token}`;
+
+  // ZERO CHAT POLLUTION RULE:
+  // Once initial onboarding handshake succeeded and neither tunnelUrl nor token changed,
+  // NEVER inject Rev #N brief updates into the user's chat! All config/weight/CLI/question changes
+  // are already delivered silently in real time via HTTP _livePolicy on every /api/v1/* call!
+  if (!force && st.muse.autoBriefSynced && st.muse.lastSyncedEndpointSig === endpointSig) {
+    return { ok: true, message: '最新策略已通过 HTTP 通道静默生效（无需向聊天框发送协议）' };
+  }
+
   const clis = await getFastClis(st);
   const brief = buildMuseBrief(st, clis, benchmarks?.getCache().digest);
   const hash = crypto.createHash('sha256').update(brief).digest('hex').slice(0, 16);
@@ -653,15 +664,14 @@ async function syncLatestBriefToMuse(force = false): Promise<{ ok: boolean; mess
   }
 
   const nextRev = (st.muse.briefRevision || 0) + 1;
-  const payload = `【FMC 调度协议已更新 · 版本 Rev #${nextRev}（请覆盖旧记忆，一切以本条最新协议为准）】
-以下为当前最新生效的控制接口、已启用 CLI 职能权重与工作流策略。此前历史消息中的旧地址、旧 Token、旧 CLI 列表或旧规则均已作废，请立即更新记忆并严格以本版本（Rev #${nextRev}）为准执行：
-
+  const payload = `【MuseDeck 调度协议握手 · Rev #${nextRev}（请静默记住接口凭证，简短回复一句已就绪即可）】
 ${brief}`;
 
   const res = await sendTextToMuseChat(payload);
   if (res.ok) {
     const updated = store.update((s) => {
       s.muse.lastBriefHash = hash;
+      s.muse.lastSyncedEndpointSig = endpointSig;
       s.muse.briefRevision = nextRev;
       s.muse.autoBriefSynced = true;
     });
@@ -1759,8 +1769,24 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.handle('cli:checkUpdates', async () => {
-    const clis = await scanLocalClis(store.getState());
-    return checkCliUpdates(clis);
+    const st = store.getState();
+    const clis = await scanLocalClis(st);
+    const localUpdates = await checkCliUpdates(clis);
+    const cloudCache = st.cliUpdatesCache || {};
+    for (const c of clis) {
+      const existing = localUpdates[c.id];
+      const cached = cloudCache[c.id];
+      if (cached?.latestVersion && (!existing || existing.error || !existing.latestVersion)) {
+        const cur = (c.version || '').replace(/^v/i, '').trim();
+        localUpdates[c.id] = {
+          currentVersion: c.version || '',
+          latestVersion: cached.latestVersion,
+          hasUpdate: Boolean(cur && cur !== cached.latestVersion),
+          checkedAt: cached.checkedAt
+        };
+      }
+    }
+    return localUpdates;
   });
 
   ipcMain.handle('cli:install', async (_ev, cliId: string) => {

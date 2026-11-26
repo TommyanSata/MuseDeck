@@ -240,6 +240,9 @@ ${openQuestionsBlock}
 16. **【主动思考触达】当你完成后台思考想主动追问用户未决问题时调用（或直接在聊天发言，系统均会自动捕获推送飞书）**：
    \`POST ${baseUrl}/api/v1/proactive/push\`
    Body: \`{"questionId": "可选关联议题ID", "text": "你主动思考后的新见解与追问内容", "options": ["可选快捷答复1", "可选快捷答复2"]}\`
+17. **【静默云端维护（严禁在对话中播报）】**：
+   - 所有最新配置变更（100% 权重、启用 CLI、审批模式、未决议题）都会随每次接口 JSON 的 \`_livePolicy\` 字段实时下发，请直接以 \`_livePolicy\` 为准，无需用户重发协议。
+   - 若接口 JSON 中附带 \`_silentCloudTasks\`（如更新评测榜单 \`POST /api/v1/benchmarks/update\`、补全未知模型能力画像 \`POST /api/v1/clis/model-profiles\`、补全 CLI 最新版本号 \`POST /api/v1/clis/updates-cache\`），请在工具调用阶段利用你的云端能力顺手静默 \`POST\` 回写，**严禁在给用户的聊天回复里提及这些后台缓存维护动作，确保对话 100% 纯净无冗余**！
 
 ## 5. 标准闭环流程（省预算 + 递进式完善）
 1. **先定项目归属**：收到需求后，先查 \`GET /api/v1/projects\` 和 \`GET /api/v1/clis\`，调 \`propose-project\` 确认项目归属；
@@ -306,14 +309,83 @@ export class ControlServer {
     this.server = null;
   }
 
-  private sendJson(res: http.ServerResponse, status: number, body: unknown): void {
+  private buildSilentEnvelope(unprofiledModels?: string[]): {
+    _livePolicy: Record<string, unknown>;
+    _silentCloudTasks?: Array<Record<string, unknown>>;
+  } {
+    const st = this.store.getState();
+    const wf = st.workflow || {
+      reviewMode: 'muse_review',
+      maxAutoRounds: 3,
+      tokenBudget: 150000,
+      stallLimit: 2,
+      autoWakeMuse: true
+    };
+    const enabledCliSummary = Object.entries(st.cliConfigs || {})
+      .filter(([, cfg]) => cfg.enabled)
+      .map(([id, cfg]) => ({
+        id,
+        defaultModel: cfg.defaultModel || 'default',
+        reasoningEffort: cfg.reasoningEffort || 'default',
+        costTier: cfg.costTier || defaultCliProfile(id).costTier
+      }));
+    const openQs = (st.openQuestions || [])
+      .filter((q) => q.status === 'open')
+      .slice(0, 8)
+      .map((q) => ({ id: q.id, question: q.question, projectName: q.projectName }));
+
+    const silentTasks: Array<Record<string, unknown>> = [];
+    if (this.benchmarks.needsCloudRefresh()) {
+      silentTasks.push({
+        type: 'refresh_benchmarks',
+        endpoint: 'POST /api/v1/benchmarks/update',
+        rule: 'SILENT_ONLY_NO_CHAT_MENTION',
+        hint: 'Local benchmark cache is stale or blocked by network. Silently POST {"digest": "...", "sources": [{"name": "LMArena / SWE-bench / Artificial Analysis", "highlights": ["..."]}]} when convenient. NEVER mention this in user chat.'
+      });
+    }
+    if (unprofiledModels && unprofiledModels.length > 0) {
+      silentTasks.push({
+        type: 'profile_models',
+        endpoint: 'POST /api/v1/clis/model-profiles',
+        rule: 'SILENT_ONLY_NO_CHAT_MENTION',
+        models: unprofiledModels.slice(0, 12),
+        hint: 'Silently POST {"profiles": {"<modelId>": {"summary": "strengths & tier", "costLevel": "low|medium|high|flagship"}}} without mentioning in user chat.'
+      });
+    }
+
+    return {
+      _livePolicy: {
+        planApprovalMode: wf.planApprovalMode || 'adaptive',
+        modelRoutingMode: wf.modelRoutingMode || 'muse_ask',
+        decisionWeights: wf.decisionWeights || { capability: 45, price: 25, quota: 20, speed: 10 },
+        reviewMode: wf.reviewMode,
+        tokenBudget: wf.tokenBudget,
+        cloudResearchFirst: wf.cloudResearchFirst !== false,
+        enabledClis: enabledCliSummary,
+        userHabits: wf.userHabits || [],
+        openQuestions: openQs
+      },
+      ...(silentTasks.length > 0 ? { _silentCloudTasks: silentTasks } : {})
+    };
+  }
+
+  private sendJson(
+    res: http.ServerResponse,
+    status: number,
+    body: unknown,
+    includeSilentEnvelope = false
+  ): void {
+    const payload =
+      includeSilentEnvelope && status === 200 && body && typeof body === 'object' && !Array.isArray(body)
+        ? { ...(body as Record<string, unknown>), ...this.buildSilentEnvelope() }
+        : body;
     res.writeHead(status, {
       'Content-Type': 'application/json; charset=utf-8',
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Headers': 'Content-Type, Authorization',
-      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS'
+      'Access-Control-Allow-Methods': 'GET, POST, PATCH, OPTIONS'
     });
-    res.end(JSON.stringify(body, null, 2));
+    res.end(JSON.stringify(payload, null, 2));
   }
 
   private getAllowedFileRoots(): string[] {
@@ -475,6 +547,11 @@ export class ControlServer {
             }
           }
           const quota = c.config.enabled ? await this.quotas.getQuota(c.id, false) : undefined;
+          const profilesMap = st.modelProfiles || {};
+          const modelProfiles: Record<string, unknown> = {};
+          for (const m of availableModels) {
+            if (profilesMap[m]) modelProfiles[m] = profilesMap[m];
+          }
           return {
             id: c.id,
             name: c.name,
@@ -483,6 +560,7 @@ export class ControlServer {
             version: c.version,
             defaultModel: c.config.defaultModel,
             availableModels,
+            modelProfiles,
             reasoningEffort: c.config.reasoningEffort || 'default',
             roles: Object.keys(roleWeights),
             roleWeights,
@@ -493,18 +571,41 @@ export class ControlServer {
           };
         })
       );
+      const knownProfiles = st.modelProfiles || {};
+      const unprofiled = Array.from(
+        new Set(
+          enriched
+            .filter((c) => c.enabled)
+            .flatMap((c) => c.availableModels)
+            .filter((m) => m && !knownProfiles[m])
+        )
+      );
       this.sendJson(res, 200, {
         modelRoutingMode: st.workflow?.modelRoutingMode || 'muse_ask',
-        clis: enriched
+        clis: enriched,
+        ...this.buildSilentEnvelope(unprofiled)
       });
       return;
     }
 
+    if (req.method === 'GET' && pathname === '/api/v1/brief') {
+      const st = this.store.getState();
+      const clis = await scanLocalClis(st);
+      const brief = buildMuseBrief(st, clis, this.benchmarks.getCache().digest);
+      this.sendJson(res, 200, { brief, ...this.buildSilentEnvelope() });
+      return;
+    }
+
     if (req.method === 'GET' && pathname === '/api/v1/workflow') {
-      this.sendJson(res, 200, {
-        config: this.store.getState().workflow,
-        status: this.workflow.getStatus()
-      });
+      this.sendJson(
+        res,
+        200,
+        {
+          config: this.store.getState().workflow,
+          status: this.workflow.getStatus()
+        },
+        true
+      );
       return;
     }
 
@@ -634,7 +735,74 @@ export class ControlServer {
     if (req.method === 'GET' && pathname === '/api/v1/benchmarks') {
       const force = parsed.searchParams.get('refresh') === '1';
       const data = force ? await this.benchmarks.refresh(true) : this.benchmarks.getCache();
-      this.sendJson(res, 200, data);
+      this.sendJson(res, 200, data, true);
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === '/api/v1/benchmarks/update') {
+      const body = await this.readBody(req);
+      const updated = this.benchmarks.updateFromMuseCloud({
+        digest: body.digest ? String(body.digest) : undefined,
+        sources: Array.isArray(body.sources)
+          ? (body.sources as Array<{ id?: string; name?: string; url?: string; highlights?: string[] }>)
+          : undefined
+      });
+      this.onStateChanged();
+      this.sendJson(res, 200, { ok: true, cache: updated });
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === '/api/v1/clis/model-profiles') {
+      const body = await this.readBody(req);
+      const rawProfiles = (body.profiles || body) as Record<string, Record<string, unknown>>;
+      const nowIso = new Date().toISOString();
+      let count = 0;
+      this.store.update((s) => {
+        const map = { ...(s.modelProfiles || {}) };
+        for (const [modelId, val] of Object.entries(rawProfiles)) {
+          if (!modelId || modelId === 'profiles' || !val || typeof val !== 'object') continue;
+          const summary = String(val.summary || val.desc || '').trim();
+          if (!summary) continue;
+          const costRaw = String(val.costLevel || 'medium').toLowerCase();
+          const costLevel =
+            costRaw === 'low' || costRaw === 'medium' || costRaw === 'high' || costRaw === 'flagship'
+              ? costRaw
+              : 'medium';
+          map[modelId] = {
+            summary: summary.slice(0, 200),
+            strengths: Array.isArray(val.strengths)
+              ? val.strengths.map((x) => String(x)).slice(0, 6)
+              : undefined,
+            costLevel,
+            updatedAt: nowIso
+          };
+          count += 1;
+        }
+        s.modelProfiles = map;
+      });
+      this.onStateChanged();
+      this.sendJson(res, 200, { ok: true, updatedModels: count });
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === '/api/v1/clis/updates-cache') {
+      const body = await this.readBody(req);
+      const versions = (body.versions || body) as Record<string, unknown>;
+      const nowIso = new Date().toISOString();
+      let count = 0;
+      this.store.update((s) => {
+        const cache = { ...(s.cliUpdatesCache || {}) };
+        for (const [cliId, ver] of Object.entries(versions)) {
+          const vStr = typeof ver === 'string' ? ver.trim() : '';
+          if (cliId && cliId !== 'versions' && vStr) {
+            cache[cliId] = { latestVersion: vStr.replace(/^v/i, ''), checkedAt: nowIso };
+            count += 1;
+          }
+        }
+        s.cliUpdatesCache = cache;
+      });
+      this.onStateChanged();
+      this.sendJson(res, 200, { ok: true, updatedClis: count });
       return;
     }
 
@@ -748,7 +916,7 @@ export class ControlServer {
     }
 
     if (req.method === 'GET' && pathname === '/api/v1/projects') {
-      this.sendJson(res, 200, { projects: this.store.getState().projects });
+      this.sendJson(res, 200, { projects: this.store.getState().projects }, true);
       return;
     }
 

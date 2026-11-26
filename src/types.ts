@@ -313,6 +313,13 @@ export interface AppSettings {
   museDisplayMode: MuseDisplayMode;
 }
 
+export interface ModelCapabilityProfile {
+  summary: string;
+  strengths?: string[];
+  costLevel?: 'low' | 'medium' | 'high' | 'flagship';
+  updatedAt: string;
+}
+
 export interface FmcState {
   onboardingCompleted: boolean;
   permissionLevel: PermissionLevel;
@@ -326,6 +333,8 @@ export interface FmcState {
   sessions?: CliSessionThread[];
   openQuestions?: OpenQuestionItem[];
   researchNotes?: ResearchNoteItem[];
+  modelProfiles?: Record<string, ModelCapabilityProfile>;
+  cliUpdatesCache?: Record<string, { latestVersion: string; checkedAt: string }>;
   messages: AggregatedMessage[];
 }
 

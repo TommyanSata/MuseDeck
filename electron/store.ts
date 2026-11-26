@@ -103,6 +103,13 @@ export interface FeishuConfig {
   allowOpenIds: string[];
 }
 
+export interface ModelCapabilityProfile {
+  summary: string;
+  strengths?: string[];
+  costLevel?: 'low' | 'medium' | 'high' | 'flagship';
+  updatedAt: string;
+}
+
 export interface MuseConfig {
   webUrl: string;
   autoBriefSynced: boolean;
@@ -110,6 +117,7 @@ export interface MuseConfig {
   avatarUrl?: string;
   avatarKind?: 'image' | 'video';
   lastBriefHash?: string;
+  lastSyncedEndpointSig?: string;
   briefRevision?: number;
   unreadProactiveCount?: number;
   lastProactiveText?: string;
@@ -200,6 +208,8 @@ export interface FmcState {
   sessions?: CliSessionThread[];
   openQuestions?: OpenQuestionItem[];
   researchNotes?: ResearchNoteItem[];
+  modelProfiles?: Record<string, ModelCapabilityProfile>;
+  cliUpdatesCache?: Record<string, { latestVersion: string; checkedAt: string }>;
   messages: AggregatedMessage[];
 }
 
@@ -318,6 +328,8 @@ export class FmcStore {
         sessions: Array.isArray(parsed.sessions) ? parsed.sessions : [],
         openQuestions: Array.isArray(parsed.openQuestions) ? parsed.openQuestions : [],
         researchNotes: Array.isArray(parsed.researchNotes) ? parsed.researchNotes : [],
+        modelProfiles: parsed.modelProfiles || {},
+        cliUpdatesCache: parsed.cliUpdatesCache || {},
         messages: parsed.messages && parsed.messages.length > 0 ? parsed.messages : base.messages
       };
     } catch {
