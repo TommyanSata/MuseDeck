@@ -28,7 +28,7 @@ export const BridgeView: React.FC<BridgeViewProps> = ({ state, feishuStatus }) =
   const [tunnelStatus, setTunnelStatus] = useState<TunnelStatusEvent>({ state: 'stopped' });
   const [briefText, setBriefText] = useState('');
   const [copied, setCopied] = useState('');
-  const [testMsg, setTestMsg] = useState('你好，这是来自 FMC 桌面端的飞书测试推送！');
+  const [testMsg, setTestMsg] = useState('你好，这是来自 MuseDeck 桌面端的飞书测试推送！');
   const [showGuide, setShowGuide] = useState(false);
 
   useEffect(() => {
@@ -76,6 +76,26 @@ export const BridgeView: React.FC<BridgeViewProps> = ({ state, feishuStatus }) =
   };
 
   const apiBase = state.controlApi.tunnelUrl.trim() || `http://127.0.0.1:${state.controlApi.port}`;
+  const trimmedAppId = appId.trim();
+  const trimmedAppSecret = appSecret.trim();
+  const isCurrentFeishuSaved =
+    Boolean(trimmedAppId) &&
+    trimmedAppId === (state.feishu.appId || '').trim() &&
+    trimmedAppSecret === (state.feishu.appSecret || '').trim();
+  const hasUnsavedFeishuDraft =
+    Boolean(trimmedAppId || trimmedAppSecret) && !isCurrentFeishuSaved;
+  const isFeishuConnected =
+    isCurrentFeishuSaved &&
+    feishuStatus.state === 'connected' &&
+    (!feishuStatus.connectedAppId || feishuStatus.connectedAppId === trimmedAppId);
+  const isFeishuVerified = Boolean(
+    isCurrentFeishuSaved &&
+      state.feishu.verified &&
+      state.feishu.verifiedAppId === trimmedAppId
+  );
+  const feishuBotAppLink = /^cli_[a-zA-Z0-9]+$/.test(trimmedAppId)
+    ? `https://applink.feishu.cn/client/bot/open?appId=${encodeURIComponent(trimmedAppId)}`
+    : '';
 
   return (
     <div className="flex h-full flex-col overflow-hidden bg-white">
@@ -126,14 +146,20 @@ export const BridgeView: React.FC<BridgeViewProps> = ({ state, feishuStatus }) =
                   <span className="inline-flex items-center gap-1.5 text-[11.5px] font-medium text-[#52525b]">
                     <span
                       className={`h-2 w-2 rounded-full ${
-                        feishuStatus.state === 'connected'
-                          ? 'bg-emerald-500'
-                          : feishuStatus.state === 'error'
-                            ? 'bg-red-500'
-                            : 'bg-[#d4d4d8]'
+                        hasUnsavedFeishuDraft
+                          ? 'bg-amber-500'
+                          : isFeishuConnected
+                            ? 'bg-emerald-500'
+                            : feishuStatus.state === 'error'
+                              ? 'bg-red-500'
+                              : 'bg-[#d4d4d8]'
                       }`}
                     />
-                    {feishuStatus.state === 'connected' ? '长连接在线' : feishuStatus.state}
+                    {hasUnsavedFeishuDraft
+                      ? '新凭证待连接'
+                      : isFeishuConnected
+                        ? '长连接在线'
+                        : feishuStatus.state}
                   </span>
                 </div>
               </div>
@@ -157,13 +183,22 @@ export const BridgeView: React.FC<BridgeViewProps> = ({ state, feishuStatus }) =
                   />
                 </div>
 
-                <div className="flex gap-2 pt-1">
+                <div className="flex flex-wrap gap-2 pt-1">
                   <button
                     onClick={() => void window.fmc.connectFeishu(appId, appSecret)}
-                    className="flex-1 rounded-xl bg-[#18181b] py-2 text-[12.5px] font-medium text-white transition-colors hover:bg-[#27272a]"
+                    className="flex-1 rounded-xl bg-[#18181b] px-3 py-2 text-[12.5px] font-medium text-white transition-colors hover:bg-[#27272a]"
                   >
-                    连接 / 重连飞书
+                    {hasUnsavedFeishuDraft ? '连接此新机器人' : '连接 / 重连飞书'}
                   </button>
+                  {feishuBotAppLink && (
+                    <button
+                      onClick={() => void window.fmc.openExternal(feishuBotAppLink)}
+                      className="rounded-xl border border-[#e4e4e7] bg-white px-3 py-2 text-[12px] font-medium text-[#111827] transition-colors hover:bg-[#f4f4f5]"
+                      title="在飞书客户端中直接打开此机器人的聊天窗口（需先发布应用版本）"
+                    >
+                      打开机器人会话
+                    </button>
+                  )}
                   <button
                     onClick={() => void window.fmc.disconnectFeishu()}
                     className="inline-flex items-center gap-1.5 rounded-xl border border-[#e4e4e7] bg-white px-3 py-2 text-[12.5px] font-medium text-[#52525b] transition-colors hover:bg-[#f4f4f5]"
@@ -173,11 +208,26 @@ export const BridgeView: React.FC<BridgeViewProps> = ({ state, feishuStatus }) =
                   </button>
                 </div>
 
-                {state.feishu.lastChatId && (
+                {hasUnsavedFeishuDraft && (
+                  <p className="rounded-xl border border-amber-200 bg-amber-50/70 px-3 py-2 text-[11.5px] text-amber-900">
+                    已填写新的飞书凭证，请点击「连接此新机器人」切换连接（旧机器人的绑定会话与验通状态将自动清空）。
+                  </p>
+                )}
+
+                {isFeishuVerified && state.feishu.lastChatId && (
                   <div className="mt-3 border-t border-[#f1f1f3] pt-3">
-                    <div className="mb-2 flex items-center gap-1.5 text-[11.5px] font-medium text-emerald-700">
-                      <CheckCircle2 className="h-3.5 w-3.5" />
-                      已绑定会话：{state.feishu.lastChatId}
+                    <div className="mb-2 flex items-center justify-between gap-2 text-[11.5px] font-medium text-emerald-700">
+                      <span className="inline-flex items-center gap-1.5">
+                        <CheckCircle2 className="h-3.5 w-3.5" />
+                        当前机器人已验通会话：{state.feishu.lastChatId}
+                        {state.feishu.lastPingMessage ? `（收到：「${state.feishu.lastPingMessage}」）` : ''}
+                      </span>
+                      <button
+                        onClick={() => void window.fmc.resetFeishuVerification()}
+                        className="text-[11px] text-[#71717a] underline hover:text-[#111827]"
+                      >
+                        重置验证
+                      </button>
                     </div>
                     <div className="flex gap-2">
                       <input
@@ -395,8 +445,8 @@ export const BridgeView: React.FC<BridgeViewProps> = ({ state, feishuStatus }) =
             </div>
             <div className="flex-1 overflow-y-auto p-5">
               <FeishuSetupGuide
-                feishuConnected={feishuStatus.state === 'connected'}
-                feishuVerified={Boolean(feishuStatus.verified || state.feishu.verified)}
+                feishuConnected={isFeishuConnected}
+                feishuVerified={isFeishuVerified}
                 appId={appId}
                 appSecret={appSecret}
               />

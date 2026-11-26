@@ -87,6 +87,7 @@ contextBridge.exposeInMainWorld('fmc', {
   connectFeishu: (appId: string, appSecret: string) =>
     ipcRenderer.invoke('feishu:connect', appId, appSecret),
   disconnectFeishu: () => ipcRenderer.invoke('feishu:disconnect'),
+  resetFeishuVerification: () => ipcRenderer.invoke('feishu:resetVerification'),
   sendFeishuTest: (text: string) => ipcRenderer.invoke('feishu:sendTest', text),
 
   // Built-in Embedded Tailscale, Serveo 443, Cloudflare & SSH Reverse Tunnel

@@ -1965,8 +1965,13 @@ function registerIpcHandlers(): void {
     const appId = (rawAppId ?? st.feishu.appId ?? '').trim();
     const appSecret = (rawAppSecret ?? st.feishu.appSecret ?? '').trim();
     const wsStatus = feishu.getStatus();
-    const wsConnected = wsStatus.state === 'connected';
-    const messageVerified = Boolean(wsStatus.verified || st.feishu.verified);
+    const isSameConnectedApp = Boolean(
+      appId && appId === st.feishu.appId && (!wsStatus.connectedAppId || wsStatus.connectedAppId === appId)
+    );
+    const wsConnected = isSameConnectedApp && wsStatus.state === 'connected';
+    const messageVerified = Boolean(
+      isSameConnectedApp && st.feishu.verified && st.feishu.verifiedAppId === appId
+    );
 
     if (!appId || !appSecret) {
       return {
@@ -2051,6 +2056,10 @@ function registerIpcHandlers(): void {
   ipcMain.handle('feishu:disconnect', () => {
     feishu.disconnect();
     return feishu.getStatus();
+  });
+
+  ipcMain.handle('feishu:resetVerification', () => {
+    return feishu.resetVerification();
   });
 
   ipcMain.handle('feishu:sendTest', async (_ev, text: string) => {

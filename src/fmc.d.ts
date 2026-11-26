@@ -125,6 +125,7 @@ export interface FmcApi {
   ) => Promise<import('./types').FeishuSetupCheckResult>;
   connectFeishu: (appId: string, appSecret: string) => Promise<FeishuStatusEvent>;
   disconnectFeishu: () => Promise<FeishuStatusEvent>;
+  resetFeishuVerification: () => Promise<FeishuStatusEvent>;
   sendFeishuTest: (text: string) => Promise<boolean>;
 
   getTunnelStatus: () => Promise<TunnelStatusEvent>;

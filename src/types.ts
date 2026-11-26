@@ -166,6 +166,7 @@ export interface FeishuConfig {
   appId: string;
   appSecret: string;
   verified: boolean;
+  verifiedAppId?: string;
   verifiedAt?: string;
   lastChatId?: string;
   lastSenderOpenId?: string;
@@ -294,6 +295,7 @@ export interface FmcState {
 
 export interface FeishuStatusEvent {
   state: 'disconnected' | 'connecting' | 'connected' | 'error';
+  connectedAppId?: string;
   message?: string;
   verified?: boolean;
   lastPing?: {

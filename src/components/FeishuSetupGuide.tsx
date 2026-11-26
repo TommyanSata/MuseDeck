@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   AlertCircle,
   Check,
@@ -6,7 +6,9 @@ import {
   ChevronDown,
   ChevronRight,
   Copy,
-  ExternalLink
+  ExternalLink,
+  HelpCircle,
+  MessageSquarePlus
 } from 'lucide-react';
 
 export const FEISHU_PERMISSION_JSON = JSON.stringify(
@@ -50,12 +52,25 @@ interface FeishuSetupGuideProps {
 export const FeishuSetupGuide: React.FC<FeishuSetupGuideProps> = ({
   feishuConnected = false,
   feishuVerified = false,
+  appId = '',
   onNavigateFeishuUrl,
   compact = false
 }) => {
   const [manualChecked, setManualChecked] = useState<Record<number, boolean>>({});
   const [copiedKey, setCopiedKey] = useState('');
   const [showScopeList, setShowScopeList] = useState(false);
+  const [showNotFoundHelp, setShowNotFoundHelp] = useState(true);
+
+  const trimmedAppId = appId.trim();
+  const validCliAppId = /^cli_[a-zA-Z0-9]+$/.test(trimmedAppId) ? trimmedAppId : '';
+  const botAppLink = validCliAppId
+    ? `https://applink.feishu.cn/client/bot/open?appId=${encodeURIComponent(validCliAppId)}`
+    : '';
+
+  // Reset manual step checkmarks whenever user switches to a different App ID
+  useEffect(() => {
+    setManualChecked({});
+  }, [trimmedAppId]);
 
   const copy = async (key: string, text: string) => {
     await navigator.clipboard.writeText(text);
@@ -72,7 +87,7 @@ export const FeishuSetupGuide: React.FC<FeishuSetupGuideProps> = ({
     }
   };
 
-  // Manual confirmation for config steps; only objectively verifiable connection/ping auto-checks
+  // Strict step status: only current App ID's live connection & live ping can auto-complete step 4 & 6
   const stepDone: Record<number, boolean> = {
     1: Boolean(manualChecked[1]),
     2: Boolean(manualChecked[2]),
@@ -154,7 +169,7 @@ export const FeishuSetupGuide: React.FC<FeishuSetupGuideProps> = ({
               飞书机器人 6 步详细配置指引
             </h4>
             <p className="mt-0.5 text-[11px] text-[#71717a]">
-              按顺序逐项操作并点击「我已完成此步」手动确认（第 4 步连接成功与第 6 步验通会自动打勾） · 进度 {completedCount}/6
+              按顺序逐项操作并点击「我已完成此步」确认（切换新 App ID 会自动重置验证进度） · 进度 {completedCount}/6
             </p>
           </div>
         </div>
@@ -174,7 +189,7 @@ export const FeishuSetupGuide: React.FC<FeishuSetupGuideProps> = ({
             {renderCheckbox(1)}
             <div className="min-w-0 flex-1">
               <div className="flex items-center justify-between gap-2">
-                <span className="font-semibold text-[#111827]">第 1 步：创建企业自建应用</span>
+                <span className="font-semibold text-[#111827]">第 1 步：核对所属企业并创建「企业自建应用」</span>
                 <button
                   type="button"
                   onClick={openPortal}
@@ -185,9 +200,13 @@ export const FeishuSetupGuide: React.FC<FeishuSetupGuideProps> = ({
                 </button>
               </div>
               <ol className="mt-1.5 list-decimal space-y-1 pl-4 text-[11.5px] leading-relaxed text-[#52525b]">
-                <li>在左侧飞书开放平台登录你的飞书账号（个人可免费注册一个测试企业）。</li>
-                <li>点击页面上的「<strong>创建企业自建应用</strong>」，填写应用名称（如 <code className="rounded bg-[#f4f4f5] px-1">MuseDeck</code>）与描述。</li>
-                <li>点击「确定」进入该应用的管理后台。</li>
+                <li>
+                  登录飞书开放平台（<code className="rounded bg-[#f4f4f5] px-1">open.feishu.cn</code>），<strong>先看页面右上角头像旁的「当前企业/团队名称」</strong>（纯个人号可免费新建一个自己的个人测试企业，这样你自己是管理员可免审秒发布）。
+                </li>
+                <li>
+                  打开手机或电脑<strong>飞书客户端左上角头像</strong>，确认当前切换在<strong>同一家企业/团队</strong>下（若两边组织不一致，发布后飞书里一定找不到该机器人）。
+                </li>
+                <li>点击「<strong>创建企业自建应用</strong>」，填写名称（如 <code className="rounded bg-[#f4f4f5] px-1">MuseDeck</code>）与描述，点击「确定」。</li>
               </ol>
               {renderConfirmPill(1)}
             </div>
@@ -201,8 +220,8 @@ export const FeishuSetupGuide: React.FC<FeishuSetupGuideProps> = ({
             <div className="min-w-0 flex-1">
               <span className="font-semibold text-[#111827]">第 2 步：添加「机器人」能力</span>
               <ol className="mt-1.5 list-decimal space-y-1 pl-4 text-[11.5px] leading-relaxed text-[#52525b]">
-                <li>在应用后台左侧菜单栏点击「<strong>添加应用能力</strong>」。</li>
-                <li>找到「<strong>机器人</strong>」卡片，点击右下角的「<strong>+ 添加</strong>」即可启用机器人身份。</li>
+                <li>在应用后台左侧菜单栏点击「<strong>添加应用能力</strong>」→「按能力添加」。</li>
+                <li>找到「<strong>机器人</strong>」卡片，点击右下角的「<strong>+ 添加</strong>」启用机器人身份。</li>
               </ol>
               {renderConfirmPill(2)}
             </div>
@@ -265,22 +284,22 @@ export const FeishuSetupGuide: React.FC<FeishuSetupGuideProps> = ({
             {renderCheckbox(4)}
             <div className="min-w-0 flex-1">
               <div className="flex items-center justify-between gap-2">
-                <span className="font-semibold text-[#111827]">第 4 步：复制凭证并先在 MuseDeck 点「连接」</span>
+                <span className="font-semibold text-[#111827]">第 4 步：复制新机器人凭证并先在 MuseDeck 点「连接」</span>
                 {feishuConnected && (
                   <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-800">
-                    长连接已在线
+                    当前 App ID 已在线
                   </span>
                 )}
               </div>
               <ol className="mt-1.5 list-decimal space-y-1 pl-4 text-[11.5px] leading-relaxed text-[#52525b]">
-                <li>在应用后台左侧点击「<strong>凭证与基础信息</strong>」，复制 <code className="rounded bg-[#f4f4f5] px-1">App ID</code> 与 <code className="rounded bg-[#f4f4f5] px-1">App Secret</code>。</li>
-                <li>粘贴到本页上方的输入框中，点击「<strong>连接飞书长连接</strong>」，等待状态变为绿色「在线」。</li>
+                <li>在应用后台左侧点击「<strong>凭证与基础信息</strong>」，复制当前应用的 <code className="rounded bg-[#f4f4f5] px-1">App ID</code> 与 <code className="rounded bg-[#f4f4f5] px-1">App Secret</code>。</li>
+                <li>粘贴到上方输入框中，点击「<strong>连接飞书长连接</strong>」，等待当前应用状态变为「在线」。</li>
               </ol>
               {!compact && !stepDone[4] && (
                 <div className="mt-2 flex items-start gap-1.5 rounded-lg bg-amber-50/80 px-2.5 py-1.5 text-[11px] text-amber-900 ring-1 ring-amber-200/70">
                   <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600" />
                   <span>
-                    顺序很关键：必须先在 MuseDeck 连上长连接，再去第 5 步点保存，否则飞书会提示「未检测到在线长连接客户端」。
+                    顺序很关键：必须先把当前新机器人在 MuseDeck 连上长连接，再去第 5 步点保存，否则飞书会报错「未检测到在线长连接客户端」。
                   </span>
                 </div>
               )}
@@ -325,18 +344,94 @@ export const FeishuSetupGuide: React.FC<FeishuSetupGuideProps> = ({
             {renderCheckbox(6)}
             <div className="min-w-0 flex-1">
               <div className="flex items-center justify-between gap-2">
-                <span className="font-semibold text-[#111827]">第 6 步：发布应用版本并私聊验证</span>
+                <span className="font-semibold text-[#111827]">第 6 步：发布线上版本并一键唤起机器人验证</span>
                 {feishuVerified && (
                   <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-medium text-emerald-800">
-                    已收到消息验通
+                    当前机器人已验通
                   </span>
                 )}
               </div>
-              <ol className="mt-1.5 list-decimal space-y-1 pl-4 text-[11.5px] leading-relaxed text-[#52525b]">
-                <li>在应用后台左侧点击「<strong>版本管理与发布</strong>」→「<strong>创建版本</strong>」。</li>
-                <li>填写版本号（如 <code className="rounded bg-[#f4f4f5] px-1">1.0.0</code>）和更新说明，点击「<strong>保存</strong>」→「<strong>确认发布</strong>」（测试企业通常秒过审）。</li>
-                <li>打开手机或电脑飞书，搜索你刚创建的机器人名称，私聊发送一句「<strong>你好</strong>」；收到 MuseDeck 自动回复即代表双向打通！</li>
+              <ol className="mt-1.5 list-decimal space-y-1.5 pl-4 text-[11.5px] leading-relaxed text-[#52525b]">
+                <li>左侧点击「<strong>版本管理与发布</strong>」→「<strong>创建版本</strong>」。</li>
+                <li>
+                  填写版本号（如 <code className="rounded bg-[#f4f4f5] px-1">1.0.0</code>）、更新说明；若页面出现「<strong>移动端 / 桌面端默认能力</strong>」，均下拉选择「<strong>机器人</strong>」。
+                </li>
+                <li>
+                  检查页面下方的「<strong>可用范围</strong>」：确保已包含<strong>你自己（创建者）或全员</strong>（若为空请点「编辑」把自己勾上，否则发布后飞书里搜不到）。
+                </li>
+                <li>
+                  先点页面底部的「<strong>保存</strong>」，<strong>紧接着必须再点右上角蓝色的「申请线上发布 / 确认发布」</strong>，直到版本状态变为绿色「<strong>已发布</strong>」！
+                </li>
+                <li>
+                  版本变为「已发布」后，直接点击下方按钮<strong>免搜索一键唤起飞书客户端机器人聊天窗</strong>，发送一句「<strong>你好</strong>」，收到 MuseDeck 自动回复即代表彻底打通！
+                </li>
               </ol>
+
+              {/* Direct One-Click AppLink Launcher */}
+              {botAppLink ? (
+                <div className="mt-2.5 flex flex-wrap items-center gap-2 rounded-lg border border-[#e4e4e7] bg-[#fafafa] p-2.5">
+                  <button
+                    type="button"
+                    onClick={() => void window.fmc.openExternal(botAppLink)}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-[#18181b] px-3 py-1.5 text-[11.5px] font-medium text-white transition-colors hover:bg-[#27272a]"
+                  >
+                    <MessageSquarePlus className="h-3.5 w-3.5" />
+                    一键在飞书中打开该机器人对话框
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void copy('applink', botAppLink)}
+                    className="inline-flex items-center gap-1 rounded-lg border border-[#e4e4e7] bg-white px-2.5 py-1.5 text-[11px] font-medium text-[#3f3f46] hover:bg-[#f4f4f5]"
+                  >
+                    {copiedKey === 'applink' ? (
+                      <Check className="h-3 w-3 text-emerald-600" />
+                    ) : (
+                      <Copy className="h-3 w-3" />
+                    )}
+                    {copiedKey === 'applink' ? '已复制唤起链接' : '复制链接发到手机飞书打开'}
+                  </button>
+                </div>
+              ) : (
+                <div className="mt-2 rounded-lg bg-[#fafafa] px-2.5 py-1.5 text-[11px] text-[#71717a] ring-1 ring-[#f1f1f3]">
+                  提示：在上方填入 <code className="font-mono">cli_</code> 开头的 App ID 后，此处会自动生成「一键唤起飞书机器人聊天窗」快捷按钮，无需在飞书手动搜索。
+                </div>
+              )}
+
+              {/* Troubleshooting Box: Why didn't the bot appear in Feishu? */}
+              <div className="mt-2.5 rounded-lg border border-amber-200/80 bg-amber-50/60 p-2.5 text-[11px] text-amber-950">
+                <button
+                  type="button"
+                  onClick={() => setShowNotFoundHelp((v) => !v)}
+                  className="flex w-full items-center justify-between text-left font-semibold text-amber-950"
+                >
+                  <span className="inline-flex items-center gap-1.5">
+                    <HelpCircle className="h-3.5 w-3.5 shrink-0 text-amber-600" />
+                    排查：按步骤走完，为什么飞书里还是搜不到 / 没出现新建的机器人？
+                  </span>
+                  {showNotFoundHelp ? (
+                    <ChevronDown className="h-3.5 w-3.5 shrink-0" />
+                  ) : (
+                    <ChevronRight className="h-3.5 w-3.5 shrink-0" />
+                  )}
+                </button>
+                {showNotFoundHelp && (
+                  <ul className="mt-1.5 list-disc space-y-1 pl-4 leading-relaxed text-amber-900">
+                    <li>
+                      <strong>原因 1（最常见）：飞书客户端切换错了企业组织</strong> —— 点开电脑或手机飞书<strong>左上角头像</strong>，检查当前选中的企业/团队是否与飞书开放平台右上角显示的企业一致（个人账号与测试企业是两个独立空间）。
+                    </li>
+                    <li>
+                      <strong>原因 2：只点了「保存」未点右上角「申请线上发布」，或卡在「待管理员审核」</strong> —— 回到「版本管理与发布」看状态是否为绿色「<strong>已发布</strong>」。若你在公司企业下需要管理员审批，建议在飞书左上角自己免费新建一个个人团队作为管理员，即可免审秒过。
+                    </li>
+                    <li>
+                      <strong>原因 3：版本的「可用范围」未包含你自己</strong> —— 在版本详情检查「可用范围」，把你自己或全员加入后重新申请发布。
+                    </li>
+                    <li>
+                      <strong>原因 4：飞书刚发布的搜索索引有 1~2 分钟延迟</strong> —— 直接点击上方的「<strong>一键在飞书中打开该机器人对话框</strong>」即可跳过搜索直接唤起私聊！
+                    </li>
+                  </ul>
+                )}
+              </div>
+
               {renderConfirmPill(6)}
             </div>
           </div>

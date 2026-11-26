@@ -138,7 +138,26 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
     return () => off();
   }, []);
 
-  const isFeishuVerified = Boolean(feishuStatus.verified || state.feishu.verified);
+  const trimmedAppId = appId.trim();
+  const trimmedAppSecret = appSecret.trim();
+  const isCurrentFeishuSaved =
+    Boolean(trimmedAppId) &&
+    trimmedAppId === (state.feishu.appId || '').trim() &&
+    trimmedAppSecret === (state.feishu.appSecret || '').trim();
+  const hasUnsavedFeishuDraft =
+    Boolean(trimmedAppId || trimmedAppSecret) && !isCurrentFeishuSaved;
+  const isFeishuConnected =
+    isCurrentFeishuSaved &&
+    feishuStatus.state === 'connected' &&
+    (!feishuStatus.connectedAppId || feishuStatus.connectedAppId === trimmedAppId);
+  const isFeishuVerified = Boolean(
+    isCurrentFeishuSaved &&
+      state.feishu.verified &&
+      state.feishu.verifiedAppId === trimmedAppId
+  );
+  const feishuBotAppLink = /^cli_[a-zA-Z0-9]+$/.test(trimmedAppId)
+    ? `https://applink.feishu.cn/client/bot/open?appId=${encodeURIComponent(trimmedAppId)}`
+    : '';
   const enabledCount = clis.filter((c) => c.config.enabled).length;
   const isTunnelReady = Boolean(tunnelStatus.state === 'running' || tunnelUrl.trim());
   const isMuseVerified = Boolean(state.muse.tunnelVerified);
@@ -354,18 +373,22 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
                     <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-[#52525b]">
                       <span
                         className={`h-1.5 w-1.5 rounded-full ${
-                          isFeishuVerified
-                            ? 'bg-emerald-500'
-                            : feishuStatus.state === 'connected'
-                              ? 'animate-pulse bg-amber-500'
-                              : 'bg-[#d4d4d8]'
+                          hasUnsavedFeishuDraft
+                            ? 'bg-amber-500'
+                            : isFeishuVerified
+                              ? 'bg-emerald-500'
+                              : isFeishuConnected
+                                ? 'animate-pulse bg-amber-500'
+                                : 'bg-[#d4d4d8]'
                         }`}
                       />
-                      {isFeishuVerified
-                        ? '已双向验通'
-                        : feishuStatus.state === 'connected'
-                          ? '长连接在线（待发消息验通）'
-                          : '未连接'}
+                      {hasUnsavedFeishuDraft
+                        ? '新凭证待连接'
+                        : isFeishuVerified
+                          ? '当前机器人已验通'
+                          : isFeishuConnected
+                            ? '长连接在线（待发消息验通）'
+                            : '未连接'}
                     </span>
                   </div>
 
@@ -396,39 +419,81 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
                       </div>
                     </div>
 
-                    <button
-                      onClick={() => void handleConnectFeishu()}
-                      disabled={!appId.trim() || !appSecret.trim() || connecting}
-                      className="inline-flex w-full items-center justify-center gap-1.5 rounded-xl bg-[#18181b] px-4 py-2 text-[12.5px] font-medium text-white transition-colors hover:bg-[#27272a] disabled:opacity-40"
-                    >
-                      {connecting ? (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      ) : (
-                        <Radio className="h-3.5 w-3.5" />
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        onClick={() => void handleConnectFeishu()}
+                        disabled={!appId.trim() || !appSecret.trim() || connecting}
+                        className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-xl bg-[#18181b] px-4 py-2 text-[12.5px] font-medium text-white transition-colors hover:bg-[#27272a] disabled:opacity-40"
+                      >
+                        {connecting ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <Radio className="h-3.5 w-3.5" />
+                        )}
+                        {hasUnsavedFeishuDraft
+                          ? '连接到此新机器人（自动清空旧验证）'
+                          : '连接飞书长连接（无需公网服务器）'}
+                      </button>
+
+                      {feishuBotAppLink && (
+                        <button
+                          type="button"
+                          onClick={() => void window.fmc.openExternal(feishuBotAppLink)}
+                          className="inline-flex items-center gap-1 rounded-xl border border-[#e4e4e7] bg-white px-3 py-2 text-[12px] font-medium text-[#111827] transition-colors hover:bg-[#f4f4f5]"
+                          title="发布应用版本后，点此可免搜索直接在飞书客户端打开该机器人的聊天框"
+                        >
+                          <ExternalLink className="h-3.5 w-3.5" />
+                          唤起机器人对话
+                        </button>
                       )}
-                      连接飞书长连接（无需公网服务器）
-                    </button>
+                    </div>
 
                     <div
                       className={`rounded-xl border px-3 py-2 text-[11.5px] ${
-                        isFeishuVerified
-                          ? 'border-emerald-200 bg-emerald-50/70 text-emerald-900'
-                          : feishuStatus.state === 'connected'
-                            ? 'border-amber-200 bg-amber-50/70 text-amber-900'
-                            : 'border-[#eaecef] bg-[#fafafa] text-[#71717a]'
+                        hasUnsavedFeishuDraft
+                          ? 'border-amber-200 bg-amber-50/70 text-amber-900'
+                          : isFeishuVerified
+                            ? 'border-emerald-200 bg-emerald-50/70 text-emerald-900'
+                            : isFeishuConnected
+                              ? 'border-amber-200 bg-amber-50/70 text-amber-900'
+                              : 'border-[#eaecef] bg-[#fafafa] text-[#71717a]'
                       }`}
                     >
-                      {isFeishuVerified
-                        ? '飞书双向收发已验证通过！后续外出时用手机飞书发需求即可。'
-                        : feishuStatus.state === 'connected'
-                          ? '长连接已在线：完成下方第 5、6 步发布后，给机器人私聊发一句「你好」即可自动验通。'
-                          : feishuStatus.message || '请参照下方 6 步详细指引创建应用并填入 App ID / Secret'}
+                      {hasUnsavedFeishuDraft ? (
+                        <span>
+                          检测到你修改了应用凭证（尚未连接）。请点击上方黑色按钮连接到新机器人，之前旧机器人的连接与收信记录不会混用。
+                        </span>
+                      ) : isFeishuVerified ? (
+                        <div className="flex items-center justify-between gap-2">
+                          <span>
+                            当前机器人（<code className="font-mono">{trimmedAppId}</code>）已双向验通！收到测试消息：「
+                            {state.feishu.lastPingMessage || '你好'}」
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => void window.fmc.resetFeishuVerification()}
+                            className="shrink-0 rounded-md border border-emerald-300 bg-white px-2 py-0.5 text-[11px] font-medium text-emerald-800 hover:bg-emerald-100"
+                          >
+                            重新验证
+                          </button>
+                        </div>
+                      ) : isFeishuConnected ? (
+                        <span>
+                          当前机器人（<code className="font-mono">{trimmedAppId}</code>）长连接已在线：请完成下方第 5、6 步发布版本后，点「唤起机器人对话」发送一句「你好」完成验通。
+                        </span>
+                      ) : (
+                        <span>
+                          {feishuStatus.state === 'error'
+                            ? feishuStatus.message
+                            : '请参照下方 6 步详细指引创建应用并填入 App ID / Secret'}
+                        </span>
+                      )}
                     </div>
                   </div>
                 </section>
 
                 <FeishuSetupGuide
-                  feishuConnected={feishuStatus.state === 'connected'}
+                  feishuConnected={isFeishuConnected}
                   feishuVerified={isFeishuVerified}
                   appId={appId}
                   appSecret={appSecret}

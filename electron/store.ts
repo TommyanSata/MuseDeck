@@ -64,6 +64,7 @@ export interface FeishuConfig {
   appId: string;
   appSecret: string;
   verified: boolean;
+  verifiedAppId?: string;
   verifiedAt?: string;
   lastChatId?: string;
   lastSenderOpenId?: string;

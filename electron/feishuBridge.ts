@@ -7,6 +7,7 @@ import { FmcStore } from './store';
 
 export interface FeishuStatusPayload {
   state: 'disconnected' | 'connecting' | 'connected' | 'error';
+  connectedAppId?: string;
   message?: string;
   verified?: boolean;
   lastPing?: {
@@ -25,6 +26,7 @@ export class FeishuBridge {
   private onForwardToMuse: (text: string, chatId: string) => Promise<{ ok: boolean; message: string }>;
   private client: lark.Client | null = null;
   private wsClient: lark.WSClient | null = null;
+  private activeAppId = '';
   private currentStatus: FeishuStatusPayload = { state: 'disconnected' };
 
   constructor(
@@ -63,13 +65,32 @@ export class FeishuBridge {
       return err;
     }
 
+    const prevFeishu = this.store.getState().feishu;
+    const credentialsChanged =
+      prevFeishu.appId !== trimmedId ||
+      prevFeishu.appSecret !== trimmedSecret ||
+      (prevFeishu.verified && prevFeishu.verifiedAppId !== trimmedId);
+
     this.store.update((s) => {
       s.feishu.appId = trimmedId;
       s.feishu.appSecret = trimmedSecret;
+      if (credentialsChanged) {
+        s.feishu.verified = false;
+        s.feishu.verifiedAppId = undefined;
+        s.feishu.verifiedAt = undefined;
+        s.feishu.lastChatId = undefined;
+        s.feishu.lastSenderOpenId = undefined;
+        s.feishu.lastPingMessage = undefined;
+      }
     });
     this.onStateChanged();
 
-    this.setStatus({ state: 'connecting', message: '正在建立飞书 WebSocket 长连接...' });
+    this.setStatus({
+      state: 'connecting',
+      connectedAppId: trimmedId,
+      verified: false,
+      message: '正在建立飞书 WebSocket 长连接...'
+    });
 
     try {
       this.client = new lark.Client({
@@ -91,25 +112,55 @@ export class FeishuBridge {
       });
 
       await this.wsClient.start({ eventDispatcher: dispatcher });
+      this.activeAppId = trimmedId;
 
-      const verified = this.store.getState().feishu.verified;
+      const latestFeishu = this.store.getState().feishu;
+      const verified = Boolean(
+        latestFeishu.verified && latestFeishu.verifiedAppId === trimmedId
+      );
       this.setStatus({
         state: 'connected',
+        connectedAppId: trimmedId,
         verified,
         message: verified
-          ? '飞书长连接在线（已完成双向连通验证）'
-          : '飞书长连接已建立，请在手机飞书给机器人发一句话测试连通！'
+          ? '飞书长连接在线（当前机器人已完成双向连通验证）'
+          : '飞书长连接已建立，请完成事件订阅与版本发布后向该机器人发送「你好」验证连通！'
       });
       return this.currentStatus;
     } catch (err) {
+      this.activeAppId = '';
       const msg = err instanceof Error ? err.message : String(err);
       const payload: FeishuStatusPayload = {
         state: 'error',
+        verified: false,
         message: `飞书连接失败：${msg}`
       };
       this.setStatus(payload);
       return payload;
     }
+  }
+
+  resetVerification(): FeishuStatusPayload {
+    this.store.update((s) => {
+      s.feishu.verified = false;
+      s.feishu.verifiedAppId = undefined;
+      s.feishu.verifiedAt = undefined;
+      s.feishu.lastChatId = undefined;
+      s.feishu.lastSenderOpenId = undefined;
+      s.feishu.lastPingMessage = undefined;
+    });
+    this.onStateChanged();
+    const isOnline = this.currentStatus.state === 'connected';
+    this.setStatus({
+      state: this.currentStatus.state,
+      connectedAppId: isOnline ? this.activeAppId : undefined,
+      verified: false,
+      lastPing: undefined,
+      message: isOnline
+        ? '验证状态已重置，请在飞书向当前机器人发送「你好」重新验证连通'
+        : '验证状态已清空，请连接新机器人后发送消息验证'
+    });
+    return this.currentStatus;
   }
 
   disconnect(): void {
@@ -122,9 +173,11 @@ export class FeishuBridge {
       this.wsClient = null;
     }
     this.client = null;
+    this.activeAppId = '';
+    const stFeishu = this.store.getState().feishu;
     this.setStatus({
       state: 'disconnected',
-      verified: this.store.getState().feishu.verified,
+      verified: Boolean(stFeishu.verified && stFeishu.verifiedAppId === stFeishu.appId),
       message: '未连接'
     });
   }
@@ -146,10 +199,15 @@ export class FeishuBridge {
     }
 
     const now = new Date().toISOString();
-    const wasVerified = this.store.getState().feishu.verified;
+    const currentAppId = this.activeAppId || this.store.getState().feishu.appId;
+    const prevFeishu = this.store.getState().feishu;
+    const wasVerified = Boolean(
+      prevFeishu.verified && prevFeishu.verifiedAppId === currentAppId
+    );
 
     this.store.update((s) => {
       s.feishu.verified = true;
+      s.feishu.verifiedAppId = currentAppId;
       s.feishu.verifiedAt = now;
       if (chatId) s.feishu.lastChatId = chatId;
       if (senderId) {
@@ -164,8 +222,9 @@ export class FeishuBridge {
 
     this.setStatus({
       state: 'connected',
+      connectedAppId: currentAppId,
       verified: true,
-      message: '已成功监听到飞书消息，双向通道连通正常！',
+      message: `已成功监听到飞书消息：「${text}」，双向通道连通正常！`,
       lastPing: {
         text,
         senderOpenId: senderId,
@@ -190,7 +249,7 @@ export class FeishuBridge {
     if (!wasVerified && chatId) {
       await this.sendText(
         chatId,
-        `✅ FMC 桌面指挥舱已成功收到你的消息：「${text}」\n飞书长连接双向验证通过，可以返回电脑继续下一步配置本地 CLI！`
+        `✅ MuseDeck 桌面总控台已成功收到你的消息：「${text}」\n当前机器人（${currentAppId}）长连接双向验证通过，可返回电脑继续下一步配置！`
       );
       return;
     }
