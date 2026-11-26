@@ -1,42 +1,75 @@
-# MuseDeck
+<div align="center">
+  <img src="build/icon.png" alt="MuseDeck Logo" width="96" height="96" />
+  <h1>MuseDeck</h1>
+  <p><strong>A Desktop Multi-CLI AI Coding Workbench powered by Meta Muse, Feishu Bot &amp; Tailscale Funnel</strong></p>
 
-**MuseDeck** 是一款基于 Electron + React + TypeScript 的桌面端多 AI 编程 CLI 调度工作台。它通过 **Meta Muse** 作为总控监督者（Supervisor），结合 **飞书长连接机器人** 与内嵌 **Tailscale Funnel 公网穿透**，让你无论在电脑前还是外出用手机飞书，都能统一调度本机多个 AI 编程 CLI 协同开发。
+  <p>
+    <a href="README.md"><strong>English</strong></a> ·
+    <a href="README_zh.md">简体中文</a>
+  </p>
+
+  <p>
+    <a href="https://github.com/TommyanSata/MuseDeck/releases/latest">
+      <img src="https://img.shields.io/github/v/release/TommyanSata/MuseDeck?style=flat-square&color=18181b" alt="Latest Release" />
+    </a>
+    <img src="https://img.shields.io/badge/platform-Windows%20x64-0078D6?style=flat-square" alt="Windows x64" />
+    <img src="https://img.shields.io/badge/stack-Electron%20%2B%20React%20%2B%20TypeScript-3178C6?style=flat-square" alt="Tech Stack" />
+    <img src="https://img.shields.io/badge/license-MIT-10b981?style=flat-square" alt="MIT License" />
+  </p>
+</div>
 
 ---
 
-## 核心特性
+## Why MuseDeck?
 
-- **多 CLI 统一雷达与沙箱管理**：自动扫描并一键安装/更新/配置 `Claude Code`、`Codex`、`Gemini CLI`、`Antigravity CLI (agy)`、`Pi`、`OpenCode`、`DeepSeek`、`Kimi` 等本地 CLI；所有配置保存在独立沙箱目录，**绝不修改本机原有 CLI 配置文件**。
-- **两段式前置审批与自治闭环**：
-  - **项目归属确认**：每次新需求先确认归入已有项目或新建项目；
-  - **执行方案与模型决策**：支持「用户默认设定 / Muse 智能决策 / Muse 问询决策」，结合每日自动拉取的权威大模型评测榜单（LMArena / Artificial Analysis / SWE-bench）与 **100% 精确优先级权重（能力 / 价格 / 剩余额度 / 响应速度）**，支持**同一 CLI 下不同模型处理不同子任务**与**递进式升档省预算**。
-- **订阅制限额 & 按量余额监测**：支持 Codex 原生 `rate_limits`、本地 5h / 7 天 / 30 天滚动 Token 统计，以及 DeepSeek / OpenRouter / NewAPI / OneAPI / Kimi / 自定义 URL 的余额查询。
-- **手机飞书全链路遥控**：
-  - 支持飞书双向指令、图文/任意本地文档直传（Word / PDF / Excel / PPT / Markdown / ZIP）；
-  - 支持 Muse 交互选项与权限审批自动推飞书，回复数字即可远程代点；
-  - 支持安全白名单目录（项目目录 / 桌面 / 文档 / 下载）远程找文件、读文件、改文件并回传飞书。
-- **本地 CLI 历史导入与真续聊**：右键项目一键扫描并导入 `~/.codex` 与 `~/.claude` 历史会话，顶栏与侧边栏折叠收纳，携带原生 `--resume` 无缝接续上下文。
-- **个性化桌面体验**：Muse 实时动态形象同步、支持将当前 Muse 形象一键设为桌面/托盘图标、输入框上方像素风「摸鱼 ↔ 鞭策」动画舞台。
+Modern developers often run **multiple local AI coding CLIs** at the same time — `Claude Code`, `Codex`, `Gemini CLI`, `Antigravity CLI (agy)`, `Pi`, `OpenCode`, `DeepSeek`, `Kimi` — each with different strengths, models, rate limits, and pricing tiers.
+
+**MuseDeck** unifies them into one clean desktop command deck with **Meta Muse** as your autonomous Supervisor and **Feishu (Lark)** as your mobile remote control:
+
+- **Zero Config Pollution**: Every CLI's models, endpoints, roles, weights, and avatars live in MuseDeck's isolated sandbox — your local `~/.codex`, `~/.claude`, and `~/.gemini` files are **never modified**.
+- **Budget-Smart Multi-Model Routing**: Automatically fetches daily LLM benchmarks (*LMArena*, *Artificial Analysis*, *SWE-bench*), monitors subscription 5h/weekly/monthly usage & metered API balances, and routes subtasks by your exact **100% priority weights** (*Capability / Price / Quota / Speed*) — even using **different models within the same CLI** for different subtasks, escalating only when review finds gaps.
+- **Two-Stage Human-in-the-Loop Approval**: Confirm **Project Routing** first, then approve the **Execution Plan & Model Allocation** (on desktop or by replying `"OK"` in mobile Feishu) before a single token is spent.
+- **Full Mobile Remote Control**: Receive review summaries, generated images, and arbitrary local documents (`Word / PDF / Excel / PPT / ZIP / Code`) directly in Feishu, and remotely click Muse's interactive option cards by replying `1 / 2 / 3`.
 
 ---
 
-## 快速开始（开发与打包）
+## Key Capabilities
 
+| Capability | Highlights |
+| :--- | :--- |
+| **Multi-CLI Radar & Manager** | One-click install/update/uninstall, live local model scanning, CC-Switch style provider presets, latency testing, 5-tier reasoning effort slider, custom roles & `0–5` per-role weights. |
+| **Per-Project CLI Whitelist & History Resume** | Right-click any project to restrict allowed CLIs, edit metadata, or scan & import local `~/.codex` / `~/.claude` sessions with native `--resume` continuation. |
+| **Quota & Balance Awareness** | Reads Codex native `rate_limits`, tracks rolling 5h/7d/30d local token usage, and queries metered balances for DeepSeek, OpenRouter, NewAPI/OneAPI, Kimi, or custom URLs. |
+| **Embedded Tailscale Funnel** | Built-in pure-userspace `tsnet` sidecar exposes your local Control API over HTTPS 443 with Bearer token auth so Meta Muse can orchestrate local CLIs reliably. |
+| **Remote File Search & Feishu Attachments** | Safe allowlisted directory search/read (`Projects / Desktop / Documents / Downloads`, blocking `.ssh` & `.env`) and direct Feishu file transfer up to 30 MB. |
+
+---
+
+## Quick Start
+
+### Option 1: Download Prebuilt Installer (Recommended)
+Grab the latest Windows x64 installer from [**GitHub Releases**](https://github.com/TommyanSata/MuseDeck/releases/latest) (`MuseDeck-Setup-x.y.z.exe`).
+
+### Option 2: Run from Source
 ```bash
-# 1. 安装依赖
+# 1. Clone the repository
+git clone https://github.com/TommyanSata/MuseDeck.git
+cd MuseDeck
+
+# 2. Install dependencies
 npm install
 
-# 2. 本地开发运行
+# 3. Start in development mode
 npm run dev
 
-# 3. 打包 Windows 安装包 (NSIS)
+# 4. Build Windows NSIS installer
 npm run dist:win
 ```
 
-> **网络提示**：Meta Muse（`https://muse.ai`）在中国大陆直连网络环境下可能无法访问，使用 Muse 页面前请先开启 VPN / 代理（推荐系统代理或 TUN 模式）。
+> **Network Note**: Meta Muse (`https://muse.ai`) may not be directly reachable from mainland China without a VPN / proxy. If the Muse web pane fails to load, enable your VPN (system proxy or TUN mode) and reload.
 
 ---
 
 ## License
 
-MIT
+MIT © [TommyanSata](https://github.com/TommyanSata)
