@@ -368,7 +368,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           <Sliders className="h-4 w-4 text-[#52525b]" />
           <h2 className="text-[13.5px] font-semibold text-[#111827]">软件设置</h2>
         </div>
-        <span className="font-mono text-[11px] text-[#8a8f98]">MuseDeck v0.4.8</span>
+        <span className="font-mono text-[11px] text-[#8a8f98]">MuseDeck v0.5.0</span>
       </header>
 
       <div className="flex-1 overflow-y-auto px-6 py-6">
@@ -882,6 +882,104 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     }`}
                   />
                 </button>
+              </div>
+
+              {/* Cloud Scout + Proactive Muse Push & Quiet Hours */}
+              <div className="flex items-center justify-between gap-4 px-5 py-4">
+                <div>
+                  <div className="font-medium text-[#111827]">
+                    「云端探路 + 本地施工」协同（发挥 Muse 云端网页与联网优势）
+                  </div>
+                  <div className="mt-0.5 text-[11.5px] text-[#71717a]">
+                    联网检索、查最新官方文档与网页操作优先由云端 Muse 完成（零本地 CLI 额度消耗），并将核验情报落盘到项目 <code className="font-mono">.musedeck/research/</code> 供本地 CLI 施工
+                  </div>
+                </div>
+                <button
+                  onClick={() =>
+                    void onUpdateWorkflowConfig({
+                      cloudResearchFirst: workflow.cloudResearchFirst === false
+                    })
+                  }
+                  className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${
+                    workflow.cloudResearchFirst !== false ? 'bg-[#18181b]' : 'bg-[#e4e4e7]'
+                  }`}
+                >
+                  <span
+                    className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow-2xs transition-transform ${
+                      workflow.cloudResearchFirst !== false
+                        ? 'translate-x-[18px]'
+                        : 'translate-x-[3px]'
+                    }`}
+                  />
+                </button>
+              </div>
+
+              <div className="space-y-3 px-5 py-4">
+                <div className="flex items-center justify-between gap-4">
+                  <div>
+                    <div className="font-medium text-[#111827]">
+                      捕捉 Muse 不定时「主动思考追问」并推送到飞书与桌面通知
+                    </div>
+                    <div className="mt-0.5 text-[11.5px] text-[#71717a]">
+                      当 Muse 针对未决议题在后台完成思考并主动向你发问时，即使软件缩在托盘也会实时推送桌面通知与手机飞书
+                    </div>
+                  </div>
+                  <button
+                    onClick={() =>
+                      void onUpdateWorkflowConfig({
+                        proactivePushEnabled: workflow.proactivePushEnabled === false
+                      })
+                    }
+                    className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${
+                      workflow.proactivePushEnabled !== false ? 'bg-[#18181b]' : 'bg-[#e4e4e7]'
+                    }`}
+                  >
+                    <span
+                      className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow-2xs transition-transform ${
+                        workflow.proactivePushEnabled !== false
+                          ? 'translate-x-[18px]'
+                          : 'translate-x-[3px]'
+                      }`}
+                    />
+                  </button>
+                </div>
+
+                {workflow.proactivePushEnabled !== false && (
+                  <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#eaecef] bg-[#fafafa] px-3.5 py-2.5 text-[12px]">
+                    <label className="inline-flex cursor-pointer items-center gap-2 font-medium text-[#3f3f46]">
+                      <input
+                        type="checkbox"
+                        checked={workflow.quietHoursEnabled !== false}
+                        onChange={(e) =>
+                          void onUpdateWorkflowConfig({ quietHoursEnabled: e.target.checked })
+                        }
+                        className="accent-[#18181b]"
+                      />
+                      开启夜间免打扰（时段内仅留桌面灵感角标，静音不推手机飞书）
+                    </label>
+                    <div className="flex items-center gap-1.5 font-mono text-[11.5px] text-[#3f3f46]">
+                      <input
+                        type="time"
+                        value={workflow.quietHoursStart || '23:00'}
+                        disabled={workflow.quietHoursEnabled === false}
+                        onChange={(e) =>
+                          void onUpdateWorkflowConfig({ quietHoursStart: e.target.value })
+                        }
+                        className="rounded-lg border border-[#e4e4e7] bg-white px-2 py-1 outline-none focus:border-[#18181b] disabled:opacity-50"
+                      />
+                      <span>至</span>
+                      <input
+                        type="time"
+                        value={workflow.quietHoursEnd || '08:00'}
+                        disabled={workflow.quietHoursEnabled === false}
+                        onChange={(e) =>
+                          void onUpdateWorkflowConfig({ quietHoursEnd: e.target.value })
+                        }
+                        className="rounded-lg border border-[#e4e4e7] bg-white px-2 py-1 outline-none focus:border-[#18181b] disabled:opacity-50"
+                      />
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* Daily LLM Benchmark Auto-Fetch */}

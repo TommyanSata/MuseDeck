@@ -118,6 +118,15 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
     ...DEFAULT_WEIGHTS,
     ...(state.workflow?.decisionWeights || {})
   });
+  const [cloudResearchFirst, setCloudResearchFirst] = useState<boolean>(
+    state.workflow?.cloudResearchFirst !== false
+  );
+  const [proactivePushEnabled, setProactivePushEnabled] = useState<boolean>(
+    state.workflow?.proactivePushEnabled !== false
+  );
+  const [quietHoursEnabled, setQuietHoursEnabled] = useState<boolean>(
+    state.workflow?.quietHoursEnabled !== false
+  );
 
   // Step 5 Muse pre-flight permission handshake states
   const [testingPerm, setTestingPerm] = useState(false);
@@ -211,7 +220,10 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
       modelRoutingMode: routingMode,
       reviewMode,
       tokenBudget,
-      decisionWeights: weights
+      decisionWeights: weights,
+      cloudResearchFirst,
+      proactivePushEnabled,
+      quietHoursEnabled
     });
     goStep(4);
   };
@@ -769,6 +781,57 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
                           </button>
                         ))}
                       </div>
+                    </div>
+                  </div>
+                </section>
+
+                {/* 5. Cloud Scout & Proactive Muse Superpowers */}
+                <section className="rounded-2xl border border-[#eaecef] bg-white p-4">
+                  <div className="font-semibold text-[#111827]">
+                    5. Muse 云端探路与主动思考推送（推荐全开）
+                  </div>
+                  <div className="mt-2.5 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
+                    <label className="flex cursor-pointer items-start gap-2.5 rounded-xl border border-[#eaecef] bg-[#fafafa] p-3">
+                      <input
+                        type="checkbox"
+                        checked={cloudResearchFirst}
+                        onChange={(e) => setCloudResearchFirst(e.target.checked)}
+                        className="mt-0.5 accent-[#18181b]"
+                      />
+                      <div>
+                        <div className="font-medium text-[#111827]">云端探路 + 本地施工协同</div>
+                        <div className="mt-0.5 text-[11px] leading-relaxed text-[#71717a]">
+                          联网搜索、查最新文档与云端网页操作直接由 Muse 完成（零本地 CLI 额度消耗），情报自动落盘供本地 CLI 施工。
+                        </div>
+                      </div>
+                    </label>
+
+                    <div className="rounded-xl border border-[#eaecef] bg-[#fafafa] p-3">
+                      <label className="flex cursor-pointer items-start gap-2.5">
+                        <input
+                          type="checkbox"
+                          checked={proactivePushEnabled}
+                          onChange={(e) => setProactivePushEnabled(e.target.checked)}
+                          className="mt-0.5 accent-[#18181b]"
+                        />
+                        <div>
+                          <div className="font-medium text-[#111827]">主动思考实时推送飞书与桌面</div>
+                          <div className="mt-0.5 text-[11px] leading-relaxed text-[#71717a]">
+                            自动记录未定论议题；当 Muse 不定时主动追问时实时推送到手机飞书与桌面通知。
+                          </div>
+                        </div>
+                      </label>
+                      {proactivePushEnabled && (
+                        <label className="mt-2 inline-flex cursor-pointer items-center gap-1.5 pl-6 text-[11px] font-medium text-[#52525b]">
+                          <input
+                            type="checkbox"
+                            checked={quietHoursEnabled}
+                            onChange={(e) => setQuietHoursEnabled(e.target.checked)}
+                            className="accent-[#18181b]"
+                          />
+                          开启夜间免打扰（23:00–08:00 静音不推飞书，可在设置调整时段）
+                        </label>
+                      )}
                     </div>
                   </div>
                 </section>

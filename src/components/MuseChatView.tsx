@@ -2,18 +2,23 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
   AlertTriangle,
   ArrowUp,
+  BookMarked,
   Check,
   CheckCircle2,
   Copy,
   Download,
   ExternalLink,
   Globe,
+  HelpCircle,
+  Lightbulb,
   Loader2,
   MessageSquare,
   PanelRight,
+  Plus,
   Radio,
   Sparkles,
   Terminal,
+  Trash2,
   X,
   XCircle
 } from 'lucide-react';
@@ -45,8 +50,8 @@ interface MuseChatViewProps {
 
 const QUICK_PROMPTS = [
   '检查本地所有已启用的 CLI 状态与默认模型',
-  '列出当前所有项目组，并汇报最近一次任务结果',
-  '请测试本地控制接口连通性并回复我结果'
+  '发挥你的云端联网与网页操作能力，帮我查最新文档并把核心结论落盘到项目',
+  '查看当前未决议题池，结合云端最新实践给我拍板建议'
 ];
 
 export const MuseChatView: React.FC<MuseChatViewProps> = ({
@@ -73,6 +78,9 @@ export const MuseChatView: React.FC<MuseChatViewProps> = ({
   const [syncTip, setSyncTip] = useState('');
   const [copiedIdx, setCopiedIdx] = useState<number | null>(null);
   const [copiedDomain, setCopiedDomain] = useState(false);
+  const [addingQuestion, setAddingQuestion] = useState(false);
+  const [newQuestionText, setNewQuestionText] = useState('');
+  const [showResolvedQuestions, setShowResolvedQuestions] = useState(false);
   const bottomRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -106,6 +114,9 @@ export const MuseChatView: React.FC<MuseChatViewProps> = ({
   const sendText = async (raw: string) => {
     const text = raw.trim();
     if (!text || sending) return;
+    if ((state.muse.unreadProactiveCount || 0) > 0) {
+      void window.fmc.clearProactiveUnread();
+    }
     setInput('');
     setSending(true);
     setMessages((prev) => [...prev, { role: 'user', text }]);
@@ -146,6 +157,26 @@ export const MuseChatView: React.FC<MuseChatViewProps> = ({
     .filter((m) => m.source === 'cli')
     .slice(-5)
     .reverse();
+
+  const allQuestions = state.openQuestions || [];
+  const openQuestions = allQuestions.filter((q) => q.status === 'open');
+  const resolvedQuestions = allQuestions.filter((q) => q.status === 'resolved');
+  const researchNotes = (state.researchNotes || []).slice(0, 6);
+  const unreadProactive = state.muse.unreadProactiveCount || 0;
+
+  const handleQuickAddQuestion = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const q = newQuestionText.trim();
+    if (!q) return;
+    setNewQuestionText('');
+    setAddingQuestion(false);
+    await window.fmc.mutateOpenQuestion({
+      action: 'add',
+      question: q,
+      projectId: state.projects[0]?.id,
+      projectName: state.projects[0]?.name
+    });
+  };
 
   const activeTunnelUrl = tunnelStatus.url || state.controlApi.tunnelUrl;
 
@@ -274,6 +305,25 @@ export const MuseChatView: React.FC<MuseChatViewProps> = ({
                 className="rounded-lg bg-[#18181b] px-2.5 py-1 text-[11px] font-medium text-white hover:bg-[#27272a]"
               >
                 去网页确认
+              </button>
+            </div>
+          )}
+
+          {unreadProactive > 0 && (
+            <div className="flex shrink-0 items-center justify-between gap-3 border-b border-amber-200/80 bg-amber-50/60 px-5 py-2 text-[12px] text-amber-950">
+              <span className="inline-flex min-w-0 items-center gap-2">
+                <Lightbulb className="h-3.5 w-3.5 shrink-0 text-amber-600" />
+                <span className="truncate font-medium">
+                  Muse 刚刚主动发起了 {unreadProactive} 条新思考追问
+                  {state.muse.lastProactiveText ? `：「${state.muse.lastProactiveText.slice(0, 60)}」` : ''}
+                </span>
+              </span>
+              <button
+                type="button"
+                onClick={() => void window.fmc.clearProactiveUnread()}
+                className="shrink-0 rounded-lg border border-amber-300 bg-white px-2.5 py-0.5 text-[11px] font-medium text-amber-900 hover:bg-amber-100"
+              >
+                知道了
               </button>
             </div>
           )}
@@ -641,6 +691,8 @@ export const MuseChatView: React.FC<MuseChatViewProps> = ({
                 museAvatarUrl={state.muse.avatarUrl}
                 runningCliIds={runningCliIds}
                 clis={clis}
+                hasUnreadProactive={unreadProactive > 0}
+                openQuestionCount={openQuestions.length}
               />
               <div className="relative z-10 rounded-2xl border border-[#e4e4e7] bg-white px-3.5 pt-3 pb-2 shadow-composer transition-all focus-within:border-[#a1a1aa] focus-within:shadow-composer-focus">
                 <textarea
@@ -758,7 +810,194 @@ export const MuseChatView: React.FC<MuseChatViewProps> = ({
 
               <div className="border-t border-[#eaecef]" />
 
-              {/* Section 2: Active CLIs */}
+              {/* Section 2: Open Questions Ledger (for Muse Proactive Follow-up) */}
+              <div>
+                <div className="mb-2 flex items-center justify-between">
+                  <span className="inline-flex items-center gap-1 text-[11px] font-medium text-[#8a8f98]">
+                    <HelpCircle className="h-3 w-3 text-amber-600" />
+                    未决议题池 ({openQuestions.length})
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setAddingQuestion((v) => !v)}
+                    className="inline-flex items-center gap-0.5 text-[11px] font-medium text-[#52525b] hover:text-[#111827]"
+                    title="添加尚未定论的问题，供 Muse 后续主动思考与调研追问"
+                  >
+                    <Plus className="h-3 w-3" />
+                    记悬念
+                  </button>
+                </div>
+
+                {addingQuestion && (
+                  <form onSubmit={(e) => void handleQuickAddQuestion(e)} className="mb-2 space-y-1.5">
+                    <input
+                      value={newQuestionText}
+                      onChange={(e) => setNewQuestionText(e.target.value)}
+                      placeholder="输入待定论的技术/产品问题..."
+                      autoFocus
+                      className="w-full rounded-lg border border-[#d4d4d8] bg-white px-2.5 py-1.5 text-[11.5px] text-[#111827] outline-none focus:border-[#18181b]"
+                    />
+                    <div className="flex justify-end gap-1">
+                      <button
+                        type="button"
+                        onClick={() => setAddingQuestion(false)}
+                        className="rounded-md px-2 py-0.5 text-[10.5px] text-[#71717a] hover:bg-[#f1f1f3]"
+                      >
+                        取消
+                      </button>
+                      <button
+                        type="submit"
+                        className="rounded-md bg-[#18181b] px-2 py-0.5 text-[10.5px] font-medium text-white hover:bg-[#27272a]"
+                      >
+                        存入议题池
+                      </button>
+                    </div>
+                  </form>
+                )}
+
+                {openQuestions.length === 0 ? (
+                  <div className="rounded-lg border border-dashed border-[#e4e4e7] px-2.5 py-2 text-[11px] leading-relaxed text-[#8a8f98]">
+                    暂无待定议题。遇到「先放一放 / 还没想好」的问题可随手记下或让 Muse 自动记录，供其后续主动思考追问。
+                  </div>
+                ) : (
+                  <div className="space-y-1.5">
+                    {openQuestions.slice(0, 6).map((q) => (
+                      <div
+                        key={q.id}
+                        className="rounded-lg border border-[#eaecef] bg-white p-2 shadow-2xs"
+                      >
+                        <div className="text-[11.5px] font-medium leading-snug text-[#111827]">
+                          {q.question}
+                        </div>
+                        {q.projectName && (
+                          <div className="mt-0.5 text-[10px] text-[#8a8f98]">《{q.projectName}》</div>
+                        )}
+                        <div className="mt-1.5 flex items-center justify-between gap-1 border-t border-[#f4f4f5] pt-1.5">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              void window.fmc.mutateOpenQuestion({ action: 'ask_muse', id: q.id })
+                            }
+                            className="inline-flex items-center gap-1 rounded bg-amber-50 px-1.5 py-0.5 text-[10.5px] font-medium text-amber-900 hover:bg-amber-100"
+                            title="让 Muse 用云端联网与思考能力分析此议题"
+                          >
+                            <Sparkles className="h-2.5 w-2.5 text-amber-600" />
+                            让 Muse 云端深思
+                          </button>
+                          <div className="flex items-center gap-1">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                void window.fmc.mutateOpenQuestion({ action: 'resolve', id: q.id })
+                              }
+                              className="rounded px-1.5 py-0.5 text-[10.5px] text-emerald-700 hover:bg-emerald-50"
+                              title="标记为已得出结论"
+                            >
+                              结项
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                void window.fmc.mutateOpenQuestion({ action: 'delete', id: q.id })
+                              }
+                              className="rounded p-0.5 text-[#a1a1aa] hover:bg-[#f4f4f5] hover:text-red-600"
+                              title="删除"
+                            >
+                              <Trash2 className="h-3 w-3" />
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {resolvedQuestions.length > 0 && (
+                  <div className="mt-1.5">
+                    <button
+                      type="button"
+                      onClick={() => setShowResolvedQuestions((v) => !v)}
+                      className="text-[10.5px] text-[#8a8f98] hover:text-[#111827]"
+                    >
+                      {showResolvedQuestions
+                        ? '收起已结项议题'
+                        : `查看已结项 (${resolvedQuestions.length})`}
+                    </button>
+                    {showResolvedQuestions && (
+                      <div className="mt-1 space-y-1">
+                        {resolvedQuestions.slice(0, 4).map((rq) => (
+                          <div
+                            key={rq.id}
+                            className="flex items-center justify-between gap-1 rounded bg-[#f4f4f5] px-2 py-1 text-[10.5px] text-[#71717a]"
+                          >
+                            <span className="truncate line-through">{rq.question}</span>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                void window.fmc.mutateOpenQuestion({ action: 'reopen', id: rq.id })
+                              }
+                              className="shrink-0 text-[#52525b] hover:underline"
+                            >
+                              重开
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Section 2.5: Cloud Scout Research Notes */}
+              {researchNotes.length > 0 && (
+                <>
+                  <div className="border-t border-[#eaecef]" />
+                  <div>
+                    <div className="mb-2 flex items-center justify-between">
+                      <span className="inline-flex items-center gap-1 text-[11px] font-medium text-[#8a8f98]">
+                        <BookMarked className="h-3 w-3 text-sky-600" />
+                        云端调研情报 ({researchNotes.length})
+                      </span>
+                    </div>
+                    <div className="space-y-1.5">
+                      {researchNotes.map((note) => (
+                        <div
+                          key={note.id}
+                          className="group flex items-start justify-between gap-1.5 rounded-lg border border-[#eaecef] bg-white p-2 hover:border-[#d4d4d8]"
+                        >
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (note.savedFilePath) void window.fmc.openPath(note.savedFilePath);
+                            }}
+                            className="min-w-0 flex-1 text-left"
+                            title={note.savedFilePath || note.summary}
+                          >
+                            <div className="truncate text-[11.5px] font-medium text-[#111827]">
+                              {note.title}
+                            </div>
+                            <div className="line-clamp-2 text-[10.5px] text-[#71717a]">
+                              {note.summary}
+                            </div>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void window.fmc.deleteResearchNote(note.id)}
+                            className="shrink-0 rounded p-0.5 text-[#a1a1aa] opacity-0 group-hover:opacity-100 hover:text-red-600"
+                            title="移除记录"
+                          >
+                            <X className="h-3 w-3" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </>
+              )}
+
+              <div className="border-t border-[#eaecef]" />
+
+              {/* Section 3: Active CLIs */}
               <div>
                 <div className="mb-2 flex items-center justify-between">
                   <span className="text-[11px] font-medium text-[#8a8f98]">

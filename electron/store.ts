@@ -34,10 +34,41 @@ export interface WorkflowConfig {
   decisionWeights?: DecisionPriorityWeights;
   userHabits?: string[];
   autoFetchBenchmarks?: boolean;
+  cloudResearchFirst?: boolean;
+  proactivePushEnabled?: boolean;
+  quietHoursEnabled?: boolean;
+  quietHoursStart?: string;
+  quietHoursEnd?: string;
   maxAutoRounds: number;
   tokenBudget: number;
   stallLimit: number;
   autoWakeMuse: boolean;
+}
+
+export interface OpenQuestionItem {
+  id: string;
+  projectId?: string;
+  projectName?: string;
+  question: string;
+  context?: string;
+  options?: string[];
+  status: 'open' | 'resolved';
+  resolution?: string;
+  source: 'muse' | 'user' | 'cli';
+  createdAt: string;
+  updatedAt: string;
+  lastAskedAt?: string;
+}
+
+export interface ResearchNoteItem {
+  id: string;
+  projectId?: string;
+  projectName?: string;
+  title: string;
+  summary: string;
+  sources?: string[];
+  savedFilePath?: string;
+  createdAt: string;
 }
 
 export interface CliUserConfig {
@@ -80,6 +111,9 @@ export interface MuseConfig {
   avatarKind?: 'image' | 'video';
   lastBriefHash?: string;
   briefRevision?: number;
+  unreadProactiveCount?: number;
+  lastProactiveText?: string;
+  lastProactiveAt?: string;
 }
 
 export interface SshTunnelConfig {
@@ -164,6 +198,8 @@ export interface FmcState {
   cliConfigs: Record<string, CliUserConfig>;
   projects: ProjectGroup[];
   sessions?: CliSessionThread[];
+  openQuestions?: OpenQuestionItem[];
+  researchNotes?: ResearchNoteItem[];
   messages: AggregatedMessage[];
 }
 
@@ -187,6 +223,11 @@ function defaultState(): FmcState {
       decisionWeights: { capability: 45, price: 25, quota: 20, speed: 10 },
       userHabits: [],
       autoFetchBenchmarks: true,
+      cloudResearchFirst: true,
+      proactivePushEnabled: true,
+      quietHoursEnabled: true,
+      quietHoursStart: '23:00',
+      quietHoursEnd: '08:00',
       maxAutoRounds: 3,
       tokenBudget: 150000,
       stallLimit: 2,
@@ -275,6 +316,8 @@ export class FmcStore {
         cliConfigs: { ...base.cliConfigs, ...(parsed.cliConfigs || {}) },
         projects: parsed.projects && parsed.projects.length > 0 ? parsed.projects : base.projects,
         sessions: Array.isArray(parsed.sessions) ? parsed.sessions : [],
+        openQuestions: Array.isArray(parsed.openQuestions) ? parsed.openQuestions : [],
+        researchNotes: Array.isArray(parsed.researchNotes) ? parsed.researchNotes : [],
         messages: parsed.messages && parsed.messages.length > 0 ? parsed.messages : base.messages
       };
     } catch {

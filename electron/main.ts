@@ -9,6 +9,7 @@ import {
   ipcMain,
   Menu,
   nativeImage,
+  Notification,
   session,
   shell,
   Tray,
@@ -24,7 +25,7 @@ import {
   scanLocalClis,
   testCliEndpoint
 } from './cliScanner';
-import { buildMuseBrief, ControlServer } from './controlServer';
+import { buildMuseBrief, ControlServer, isWithinQuietHours } from './controlServer';
 import { FeishuBridge } from './feishuBridge';
 import { QuotaManager } from './quotaManager';
 import { readLocalCliSessionMessages, scanLocalCliSessions } from './sessionScanner';
@@ -522,6 +523,7 @@ async function sendTextToMuseChat(msgText: string): Promise<{ ok: boolean; messa
       reason?: string;
     };
     if (res?.ok) {
+      markMuseInteraction();
       return { ok: true, message: '已自动发送给 Muse' };
     }
     return {
@@ -538,6 +540,93 @@ async function sendTextToMuseChat(msgText: string): Promise<{ ok: boolean; messa
 
 let lastPushedTunnelUrl = '';
 let briefSyncTimer: NodeJS.Timeout | null = null;
+let lastMuseInteractionAt = 0;
+let proactiveBaselineReady = false;
+let lastObservedMuseReply = '';
+
+function markMuseInteraction(): void {
+  lastMuseInteractionAt = Date.now();
+}
+
+function deliverProactiveMuseThought(
+  rawText: string,
+  actions?: Array<{ id: string; label: string }>
+): void {
+  const cleaned = rawText.trim();
+  if (!cleaned || cleaned.length < 4) return;
+  // Skip automatic protocol revision acks
+  if (/^Rev\s*#\d+/i.test(cleaned)) return;
+
+  const st = store.getState();
+  if (st.muse.lastProactiveText && cleaned === st.muse.lastProactiveText) {
+    return;
+  }
+
+  const nowIso = new Date().toISOString();
+  const nextState = store.update((s) => {
+    s.muse.unreadProactiveCount = (s.muse.unreadProactiveCount || 0) + 1;
+    s.muse.lastProactiveText = cleaned.slice(0, 800);
+    s.muse.lastProactiveAt = nowIso;
+  });
+  broadcast('state:changed', nextState);
+  broadcast('muse:proactiveThought', {
+    text: cleaned,
+    at: nowIso,
+    quietHours: isWithinQuietHours(nextState.workflow)
+  });
+
+  const wf = nextState.workflow;
+  if (wf?.proactivePushEnabled === false) {
+    return;
+  }
+  // Respect Night Do-Not-Disturb window (default 23:00-08:00): keep quiet desktop badge only
+  if (isWithinQuietHours(wf)) {
+    return;
+  }
+
+  // 1. Native Windows Desktop Notification (useful when minimized to tray or coding in IDE)
+  try {
+    if (Notification.isSupported()) {
+      const notif = new Notification({
+        title: '💡 Muse 主动思考追问',
+        body: cleaned.replace(/\s+/g, ' ').slice(0, 140)
+      });
+      notif.on('click', () => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          if (mainWindow.isMinimized()) mainWindow.restore();
+          mainWindow.show();
+          mainWindow.focus();
+        }
+      });
+      notif.show();
+    }
+  } catch {
+    // ignore notification errors
+  }
+
+  // 2. Push to Feishu so user can reply to Muse's proactive question right from their phone!
+  const chatId = nextState.feishu.lastChatId || '';
+  if (chatId && feishu?.getStatus().state === 'connected') {
+    lastDirectFeishuPushAt = Date.now();
+    if (actions && actions.length >= 2) {
+      pendingMuseActions = actions.map((a) => ({
+        id: a.id,
+        label: a.label,
+        kind: 'option'
+      }));
+      const opts = actions.map((a, i) => `${i + 1}. ${a.label}`).join('\n');
+      void feishu.sendText(
+        chatId,
+        `💡 【Muse 主动思考追问】\n${cleaned.slice(0, 1300)}\n\n${opts}\n👉 直接回复序号 1~${actions.length} 或文字即可继续和 Muse 敲定结论！`
+      );
+    } else {
+      void feishu.sendText(
+        chatId,
+        `💡 【Muse 主动思考追问】\n${cleaned.slice(0, 1400)}\n\n👉 直接在此回复文字即可回传给电脑端 Muse 继续探讨！`
+      );
+    }
+  }
+}
 
 async function getFastClis(st: ReturnType<FmcStore['getState']>): Promise<DetectedCli[]> {
   if (cachedClis) {
@@ -818,6 +907,26 @@ async function pollMuseLiveState(): Promise<void> {
               lastDirectFeishuPushAt = Date.now();
               void feishu.sendText(chatId, `💬 【Muse 回复】\n${latestText.slice(0, 1500)}`);
             }
+          }
+        }
+      }
+    } else {
+      // Passive Proactive Muse Thought Detector:
+      // Establish baseline on first idle poll after launch so historical messages never misfire;
+      // afterwards, if Muse speaks on its own >120s after the last user/system interaction, capture & push!
+      const latestText = (res?.latestMuseReply || '').trim();
+      if (!res?.isBusy && latestText) {
+        if (!proactiveBaselineReady) {
+          lastObservedMuseReply = latestText;
+          proactiveBaselineReady = true;
+        } else if (latestText !== lastObservedMuseReply) {
+          lastObservedMuseReply = latestText;
+          const idleMs = Date.now() - lastMuseInteractionAt;
+          const apiRecentlyPushed =
+            Math.max(controlServer?.lastFeishuPushAt || 0, lastDirectFeishuPushAt) >
+            Date.now() - 15000;
+          if (idleMs > 120_000 && !apiRecentlyPushed) {
+            deliverProactiveMuseThought(latestText, res?.bgActions);
           }
         }
       }
@@ -1397,6 +1506,7 @@ function registerIpcHandlers(): void {
         true
       )) as { ok: boolean; label: string };
       if (res?.ok) {
+        markMuseInteraction();
         syncUserApprovalFromChatOrButton(res.label);
         pendingMuseActions = [];
       }
@@ -2062,6 +2172,88 @@ function registerIpcHandlers(): void {
     return feishu.resetVerification();
   });
 
+  ipcMain.handle('muse:clearProactiveUnread', () => {
+    const st = store.update((s) => {
+      s.muse.unreadProactiveCount = 0;
+    });
+    broadcast('state:changed', st);
+    return st;
+  });
+
+  ipcMain.handle(
+    'questions:mutate',
+    async (
+      _ev,
+      payload: {
+        action: 'add' | 'resolve' | 'reopen' | 'delete' | 'ask_muse';
+        id?: string;
+        question?: string;
+        context?: string;
+        projectId?: string;
+        projectName?: string;
+        resolution?: string;
+      }
+    ) => {
+      const nowIso = new Date().toISOString();
+      if (payload.action === 'ask_muse' && payload.id) {
+        const q = (store.getState().openQuestions || []).find((item) => item.id === payload.id);
+        if (q) {
+          store.update((s) => {
+            const target = (s.openQuestions || []).find((item) => item.id === payload.id);
+            if (target) target.lastAskedAt = nowIso;
+          });
+          broadcast('state:changed', store.getState());
+          const prompt = `【探讨未决议题 ${q.id}】我们之前留有一个待定问题：「${q.question}」${
+            q.context ? `\n背景说明：${q.context}` : ''
+          }\n请发挥你的云端联网搜索与深度思考能力，帮我检索最新实践或对比利弊，给出你的倾向建议帮我拍板（若得出明确参考资料也可调用 /api/v1/research/save 落盘）。`;
+          await sendTextToMuseChat(prompt);
+        }
+        return store.getState();
+      }
+
+      const next = store.update((s) => {
+        const list = Array.isArray(s.openQuestions) ? [...s.openQuestions] : [];
+        if (payload.action === 'delete' && payload.id) {
+          s.openQuestions = list.filter((item) => item.id !== payload.id);
+        } else if ((payload.action === 'resolve' || payload.action === 'reopen') && payload.id) {
+          const target = list.find((item) => item.id === payload.id);
+          if (target) {
+            target.status = payload.action === 'resolve' ? 'resolved' : 'open';
+            if (payload.resolution !== undefined) target.resolution = payload.resolution;
+            target.updatedAt = nowIso;
+          }
+          s.openQuestions = list;
+        } else if (payload.action === 'add' && payload.question?.trim()) {
+          const proj = payload.projectId
+            ? s.projects.find((p) => p.id === payload.projectId)
+            : undefined;
+          list.unshift({
+            id: `q-${Date.now().toString(36).slice(-5)}`,
+            projectId: proj?.id || payload.projectId,
+            projectName: proj?.name || payload.projectName,
+            question: payload.question.trim(),
+            context: payload.context?.trim() || undefined,
+            status: 'open',
+            source: 'user',
+            createdAt: nowIso,
+            updatedAt: nowIso
+          });
+          s.openQuestions = list.slice(0, 100);
+        }
+      });
+      broadcast('state:changed', next);
+      return next;
+    }
+  );
+
+  ipcMain.handle('research:delete', (_ev, id: string) => {
+    const next = store.update((s) => {
+      s.researchNotes = (s.researchNotes || []).filter((n) => n.id !== id);
+    });
+    broadcast('state:changed', next);
+    return next;
+  });
+
   ipcMain.handle('feishu:sendTest', async (_ev, text: string) => {
     const chatId = store.getState().feishu.lastChatId || '';
     if (!chatId) return false;
@@ -2366,7 +2558,7 @@ app.whenReady().then(async () => {
         sawBusy: false,
         baselineMuseText: lastMuseMsg
       };
-      const prompt = `【来自手机飞书的新需求】${trimmed}\n（请先调用 GET /api/v1/projects 查看现有项目列表，然后先调用 POST /api/v1/workflow/propose-project 单独问我此次任务应归入哪个已有项目还是新建项目；等我批准项目归属后，再继续制定执行方案与派单。若只需直接文字答复我，也请同步调用 POST /api/v1/feishu/send 把回复发到飞书。）`;
+      const prompt = `【来自手机飞书的消息】${trimmed}\n（若这是联网查资料、云端网页操作、日常探讨或回应你之前的主动思考追问，请直接发挥你的云端联网与网页操作能力处理，并调用 POST /api/v1/feishu/send 回复飞书；若是需要修改本地代码的新开发需求，再先查 GET /api/v1/projects 并调用 propose-project / propose-plan 派发本地 CLI。若有尚未定论的问题可记入 POST /api/v1/questions。）`;
       return sendTextToMuseChat(prompt);
     }
   );
@@ -2383,8 +2575,21 @@ app.whenReady().then(async () => {
   benchmarks = new BenchmarkManager();
   benchmarks.startDailyScheduler(store.getState().workflow?.autoFetchBenchmarks !== false);
   quotas = new QuotaManager(store);
-  controlServer = new ControlServer(store, runner, feishu, workflow, benchmarks, quotas, () =>
-    broadcast('state:changed', store.getState())
+  controlServer = new ControlServer(
+    store,
+    runner,
+    feishu,
+    workflow,
+    benchmarks,
+    quotas,
+    () => broadcast('state:changed', store.getState()),
+    (proactivePayload) => {
+      const syntheticActions = (proactivePayload.options || []).map((opt, idx) => ({
+        id: `api-opt-${idx + 1}`,
+        label: opt
+      }));
+      deliverProactiveMuseThought(proactivePayload.text, syntheticActions);
+    }
   );
   tunnel = new TunnelManager(
     store,

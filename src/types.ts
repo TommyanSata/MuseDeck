@@ -96,10 +96,41 @@ export interface WorkflowConfig {
   decisionWeights?: DecisionPriorityWeights;
   userHabits?: string[];
   autoFetchBenchmarks?: boolean;
+  cloudResearchFirst?: boolean;
+  proactivePushEnabled?: boolean;
+  quietHoursEnabled?: boolean;
+  quietHoursStart?: string;
+  quietHoursEnd?: string;
   maxAutoRounds: number;
   tokenBudget: number;
   stallLimit: number;
   autoWakeMuse: boolean;
+}
+
+export interface OpenQuestionItem {
+  id: string;
+  projectId?: string;
+  projectName?: string;
+  question: string;
+  context?: string;
+  options?: string[];
+  status: 'open' | 'resolved';
+  resolution?: string;
+  source: 'muse' | 'user' | 'cli';
+  createdAt: string;
+  updatedAt: string;
+  lastAskedAt?: string;
+}
+
+export interface ResearchNoteItem {
+  id: string;
+  projectId?: string;
+  projectName?: string;
+  title: string;
+  summary: string;
+  sources?: string[];
+  savedFilePath?: string;
+  createdAt: string;
 }
 
 export type WorkflowPhase =
@@ -180,6 +211,9 @@ export interface MuseConfig {
   tunnelVerified?: boolean;
   avatarUrl?: string;
   avatarKind?: 'image' | 'video';
+  unreadProactiveCount?: number;
+  lastProactiveText?: string;
+  lastProactiveAt?: string;
 }
 
 export interface SshTunnelConfig {
@@ -290,6 +324,8 @@ export interface FmcState {
   cliConfigs: Record<string, CliUserConfig>;
   projects: ProjectGroup[];
   sessions?: CliSessionThread[];
+  openQuestions?: OpenQuestionItem[];
+  researchNotes?: ResearchNoteItem[];
   messages: AggregatedMessage[];
 }
 

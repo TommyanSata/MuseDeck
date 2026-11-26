@@ -127,6 +127,17 @@ export interface FmcApi {
   disconnectFeishu: () => Promise<FeishuStatusEvent>;
   resetFeishuVerification: () => Promise<FeishuStatusEvent>;
   sendFeishuTest: (text: string) => Promise<boolean>;
+  clearProactiveUnread: () => Promise<FmcState>;
+  mutateOpenQuestion: (payload: {
+    action: 'add' | 'resolve' | 'reopen' | 'delete' | 'ask_muse';
+    id?: string;
+    question?: string;
+    context?: string;
+    projectId?: string;
+    projectName?: string;
+    resolution?: string;
+  }) => Promise<FmcState>;
+  deleteResearchNote: (id: string) => Promise<FmcState>;
 
   getTunnelStatus: () => Promise<TunnelStatusEvent>;
   startTailscaleTunnel: () => Promise<TunnelStatusEvent>;

@@ -89,6 +89,10 @@ contextBridge.exposeInMainWorld('fmc', {
   disconnectFeishu: () => ipcRenderer.invoke('feishu:disconnect'),
   resetFeishuVerification: () => ipcRenderer.invoke('feishu:resetVerification'),
   sendFeishuTest: (text: string) => ipcRenderer.invoke('feishu:sendTest', text),
+  clearProactiveUnread: () => ipcRenderer.invoke('muse:clearProactiveUnread'),
+  mutateOpenQuestion: (payload: Record<string, unknown>) =>
+    ipcRenderer.invoke('questions:mutate', payload),
+  deleteResearchNote: (id: string) => ipcRenderer.invoke('research:delete', id),
 
   // Built-in Embedded Tailscale, Serveo 443, Cloudflare & SSH Reverse Tunnel
   getTunnelStatus: () => ipcRenderer.invoke('tunnel:status'),

@@ -9,8 +9,30 @@ import { CliRunner } from './cliRunner';
 import { DetectedCli, scanCliModels, scanLocalClis } from './cliScanner';
 import { FeishuBridge } from './feishuBridge';
 import { QuotaManager } from './quotaManager';
-import { FmcState, FmcStore } from './store';
+import { FmcState, FmcStore, OpenQuestionItem, ResearchNoteItem } from './store';
 import { WorkflowManager } from './workflowManager';
+
+export function isWithinQuietHours(wf?: {
+  quietHoursEnabled?: boolean;
+  quietHoursStart?: string;
+  quietHoursEnd?: string;
+}): boolean {
+  if (!wf || wf.quietHoursEnabled === false) return false;
+  const parseHm = (s: string | undefined, fallback: number) => {
+    const m = String(s || '').trim().match(/^(\d{1,2}):(\d{2})$/);
+    if (!m) return fallback;
+    return (
+      Math.min(23, Math.max(0, Number(m[1]))) * 60 +
+      Math.min(59, Math.max(0, Number(m[2])))
+    );
+  };
+  const start = parseHm(wf.quietHoursStart, 23 * 60);
+  const end = parseHm(wf.quietHoursEnd, 8 * 60);
+  if (start === end) return false;
+  const now = new Date();
+  const cur = now.getHours() * 60 + now.getMinutes();
+  return start < end ? cur >= start && cur < end : cur >= start || cur < end;
+}
 
 export function defaultCliProfile(cliId: string): {
   roles: string[];
@@ -97,6 +119,25 @@ export function buildMuseBrief(
       ? habits.map((h, i) => `${i + 1}. ${h}`).join('\n')
       : '（暂未沉淀固定习惯——请在交互中观察用户对分工、审阅与审批节奏的长期偏好，并主动调用 POST /api/v1/workflow/habits 记住）';
 
+  const openQuestions = (state.openQuestions || []).filter((q) => q.status === 'open');
+  const openQuestionsBlock =
+    openQuestions.length > 0
+      ? openQuestions
+          .slice(0, 12)
+          .map(
+            (q, i) =>
+              `${i + 1}. [${q.id}]${q.projectName ? `《${q.projectName}》` : ''} ${q.question}${
+                q.context ? `（背景：${q.context}）` : ''
+              }`
+          )
+          .join('\n')
+      : '（当前暂无未决议题——当对话中出现用户说「先放一放 / 还没想好」或方案尚未定论时，请主动调用 POST /api/v1/questions 记入此处以便后续追踪）';
+
+  const cloudFirstLine =
+    wf.cloudResearchFirst !== false
+      ? '已开启（凡涉及联网搜索、查阅最新官方文档/SDK 变更、GitHub Issue、竞品网页分析与云端真实网页操作，优先由你在云端直接完成，零本地额度消耗；查清后再通过 POST /api/v1/research/save 落盘给本地 CLI 施工）'
+      : '常规模式（按需使用你的云端联网能力辅助本地 CLI）';
+
   const enabledClis = clis
     .filter((c) => c.config.enabled)
     .map((c) => {
@@ -125,7 +166,17 @@ ${baseUrl.includes('.ts.net') ? '- **公网说明**: 该 `.ts.net` 地址已开�
 ## 2. 当前已启用的本地 CLI 节点（按职能权重路由）
 ${enabledClis || '- (暂未勾选，请先在 MuseDeck 的 CLI 页面启用)'}
 
+## 2.5 你的双重核心特长：云端网页探路 + 悬念主动思考（拒绝只做传话筒）
+1. **首席云端调研与网页操作官（Cloud Scout + Local Builder）**：
+   - 你运行在海外云端，拥有本地 CLI 不具备的**真实云端网页操作能力与深度联网搜索能力**，且不消耗用户的本地 CLI Token / 订阅限额。
+   - **分工铁律**：遇到查阅最新框架/API 文档、核实版本破坏性变更、排查 GitHub Issue、分析网页/竞品或执行云端网页交互时，**请直接在云端亲自完成，绝不盲目派给本地 CLI 去硬搜外网浪费额度**！
+   - 当你要派发依赖外部新接口或第三方服务的编码任务前，先在云端查清权威规范，调用 \`POST ${baseUrl}/api/v1/research/save\` 将核验后的结论落盘到项目 \`.musedeck/research/\` 目录，再把返回的 \`savedFilePath\` 写进 \`dispatch\` 的 \`prompt\` 里让本地 CLI 按图索骥。
+2. **未决议题追踪与跨时间主动思考（Open Questions & Proactive Follow-Up）**：
+   - 当用户对某个架构取舍、产品方案或边界问题暂未给出结论（如「先放一放」「晚点再定」或留下开放问题），立即调用 \`POST ${baseUrl}/api/v1/questions\` 存入「未决议题池」；达成结论后调用 \`action: "resolve"\` 结项。
+   - 发挥你擅长**不定时主动思考追问**的优势：当你后续想到更优解或结合云端联网搜到新线索时，随时围绕下方「未决议题池」向用户发起追问（直接在本对话发言或调用 \`POST ${baseUrl}/api/v1/proactive/push\`，MuseDeck 会自动捕获并推送至用户的手机飞书与桌面通知）。
+
 ## 3. 当前工作流策略与护栏
+- **云端探路协同**: ${cloudFirstLine}
 - **执行前审批策略**: ${planModeLabel}
 - **项目模型与分工决策**: ${routingModeLabel}
 - **用户决策优先级权重**: ${weightsLine}（拆单选模型时请严格按此百分比权重权衡，并参考 \`GET /api/v1/clis\` 返回的各 CLI 实时 \`quota\` 余额与 5h/周/月限额水位！）
@@ -139,6 +190,9 @@ ${habitsBlock}
 
 ## 3.6 每日大模型权威评测参考（性价比与递进调度）
 ${benchmarkDigest || '（可调用 GET /api/v1/benchmarks 拉取最新 LMArena / Artificial Analysis / SWE-bench 榜单参考）'}
+
+## 3.7 当前未决议题池（Open Questions Ledger · 供后续主动思考与追问）
+${openQuestionsBlock}
 
 ## 4. 核心调度接口
 1. **查看已启用 CLI、职能权重与可用模型列表**：\`GET ${baseUrl}/api/v1/clis\`（返回 \`availableModels\`、当前 \`defaultModel\` 与 \`reasoningEffort\`）
@@ -175,6 +229,17 @@ ${benchmarkDigest || '（可调用 GET /api/v1/benchmarks 拉取最新 LMArena /
 13. **【远程文件检索与读取】在用户授权目录（项目目录 / 桌面 / 文档 / 下载）中查找或读取文件**：
    - 搜索文件：\`GET ${baseUrl}/api/v1/files/search?q=关键词&dir=可选目录\`
    - 读取文本文件：\`GET ${baseUrl}/api/v1/files/read?path=完整文件路径\`
+14. **【云端调研情报落盘】把你在云端联网查证的技术文档/网页结论保存进本地项目供 CLI 直接读取**：
+   - 查看已存情报：\`GET ${baseUrl}/api/v1/research\`
+   - 保存新情报：\`POST ${baseUrl}/api/v1/research/save\`
+     Body: \`{"projectName": "所属项目名", "title": "调研标题", "summary": "核心结论摘要", "content": "完整 Markdown 技术要点/代码示例", "sources": ["https://..."]}\`（返回 \`savedFilePath\`，可直接填入 \`dispatch\` 的 \`prompt\`）
+15. **【未决议题池管理】记录、查询与结项尚未定论的问题（支撑后续主动思考追问）**：
+   - 查询议题：\`GET ${baseUrl}/api/v1/questions?status=open\`
+   - 新增/结项议题：\`POST ${baseUrl}/api/v1/questions\`
+     Body: \`{"action": "add" | "resolve" | "reopen" | "delete", "id": "结项/删除时传议题ID", "projectName": "可选项目名", "question": "待定论的核心问题", "context": "背景与待权衡点", "options": ["可选方向A", "可选方向B"], "resolution": "结项时的最终结论"}\`
+16. **【主动思考触达】当你完成后台思考想主动追问用户未决问题时调用（或直接在聊天发言，系统均会自动捕获推送飞书）**：
+   \`POST ${baseUrl}/api/v1/proactive/push\`
+   Body: \`{"questionId": "可选关联议题ID", "text": "你主动思考后的新见解与追问内容", "options": ["可选快捷答复1", "可选快捷答复2"]}\`
 
 ## 5. 标准闭环流程（省预算 + 递进式完善）
 1. **先定项目归属**：收到需求后，先查 \`GET /api/v1/projects\` 和 \`GET /api/v1/clis\`，调 \`propose-project\` 确认项目归属；
@@ -192,6 +257,11 @@ export class ControlServer {
   private benchmarks: BenchmarkManager;
   private quotas: QuotaManager;
   private onStateChanged: () => void;
+  private onProactivePush?: (payload: {
+    text: string;
+    questionId?: string;
+    options?: string[];
+  }) => void;
   private server: http.Server | null = null;
   private liveModelsCache = new Map<string, { models: string[]; fetchedAt: number }>();
   public lastFeishuPushAt = 0;
@@ -203,7 +273,8 @@ export class ControlServer {
     workflow: WorkflowManager,
     benchmarks: BenchmarkManager,
     quotas: QuotaManager,
-    onStateChanged: () => void
+    onStateChanged: () => void,
+    onProactivePush?: (payload: { text: string; questionId?: string; options?: string[] }) => void
   ) {
     this.store = store;
     this.runner = runner;
@@ -212,6 +283,7 @@ export class ControlServer {
     this.benchmarks = benchmarks;
     this.quotas = quotas;
     this.onStateChanged = onStateChanged;
+    this.onProactivePush = onProactivePush;
   }
 
   start(): Promise<number> {
@@ -944,6 +1016,221 @@ export class ControlServer {
         sent,
         imagesSent,
         filesSent
+      });
+      return;
+    }
+
+    // Cloud Scout Research Notes API: Muse saves verified cloud web research into project .musedeck/research/
+    if (req.method === 'GET' && pathname === '/api/v1/research') {
+      const projectId = (parsed.searchParams.get('projectId') || '').trim();
+      const all = this.store.getState().researchNotes || [];
+      const notes = projectId ? all.filter((n) => n.projectId === projectId) : all;
+      this.sendJson(res, 200, { notes });
+      return;
+    }
+
+    if (req.method === 'POST' && (pathname === '/api/v1/research/save' || pathname === '/api/v1/research')) {
+      const body = await this.readBody(req);
+      const title = String(body.title || '').trim();
+      const content = String(body.content ?? body.summary ?? '').trim();
+      const summary = String(body.summary || content.slice(0, 280)).trim();
+      if (!title || !content) {
+        this.sendJson(res, 400, { error: 'Missing required fields: title and content/summary' });
+        return;
+      }
+      const st = this.store.getState();
+      const reqProjId = String(body.projectId || '').trim();
+      const reqProjName = String(body.projectName || '').trim().toLowerCase();
+      const proj =
+        st.projects.find((p) => p.id === reqProjId) ||
+        (reqProjName ? st.projects.find((p) => p.name.trim().toLowerCase() === reqProjName) : undefined) ||
+        st.projects[0];
+
+      const sources = Array.isArray(body.sources)
+        ? body.sources.map((s) => String(s || '').trim()).filter(Boolean)
+        : [];
+      const now = new Date();
+      const stamp = now
+        .toISOString()
+        .replace(/[-:]/g, '')
+        .replace(/\.\d+Z$/, '')
+        .replace('T', '-');
+      const slug =
+        title
+          .toLowerCase()
+          .replace(/[^a-z0-9\u4e00-\u9fa5]+/g, '-')
+          .replace(/^-+|-+$/g, '')
+          .slice(0, 36) || 'research';
+
+      let baseDir = path.join(os.homedir(), '.musedeck-research');
+      if (proj?.repoPath) {
+        try {
+          const candidate = path.resolve(proj.repoPath);
+          if (fs.existsSync(candidate) && fs.statSync(candidate).isDirectory()) {
+            baseDir = path.join(candidate, '.musedeck', 'research');
+          }
+        } catch {
+          // fallback to home research dir
+        }
+      }
+      fs.mkdirSync(baseDir, { recursive: true });
+      const savedFilePath = path.join(baseDir, `${stamp}-${slug}.md`);
+      const mdLines = [
+        `# ${title}`,
+        '',
+        `- **调研时间**: ${now.toLocaleString('zh-CN')}`,
+        proj ? `- **所属项目**: ${proj.name}` : '',
+        sources.length > 0 ? `- **参考来源**:\n${sources.map((u) => `  - ${u}`).join('\n')}` : '',
+        '',
+        '## 核心摘要',
+        summary,
+        '',
+        '## 详细云端调研内容',
+        content,
+        ''
+      ].filter((line) => line !== '');
+      fs.writeFileSync(savedFilePath, mdLines.join('\n'), 'utf-8');
+
+      const note: ResearchNoteItem = {
+        id: `res-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
+        projectId: proj?.id,
+        projectName: proj?.name,
+        title,
+        summary: summary.slice(0, 360),
+        sources,
+        savedFilePath,
+        createdAt: now.toISOString()
+      };
+      this.store.update((s) => {
+        const list = Array.isArray(s.researchNotes) ? s.researchNotes : [];
+        s.researchNotes = [note, ...list].slice(0, 100);
+      });
+      this.onStateChanged();
+      this.sendJson(res, 200, { ok: true, savedFilePath, note });
+      return;
+    }
+
+    // Open Questions Ledger API: tracks unresolved decisions for Muse proactive follow-ups
+    if (req.method === 'GET' && pathname === '/api/v1/questions') {
+      const statusFilter = (parsed.searchParams.get('status') || '').trim();
+      const projectId = (parsed.searchParams.get('projectId') || '').trim();
+      let list = this.store.getState().openQuestions || [];
+      if (statusFilter === 'open' || statusFilter === 'resolved') {
+        list = list.filter((q) => q.status === statusFilter);
+      }
+      if (projectId) {
+        list = list.filter((q) => q.projectId === projectId);
+      }
+      this.sendJson(res, 200, { questions: list });
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === '/api/v1/questions') {
+      const body = await this.readBody(req);
+      const action = String(body.action || 'add').trim().toLowerCase();
+      const nowIso = new Date().toISOString();
+      const st = this.store.getState();
+
+      if (action === 'resolve' || action === 'reopen' || action === 'delete') {
+        const id = String(body.id || '').trim();
+        if (!id) {
+          this.sendJson(res, 400, { error: 'Missing required field: id' });
+          return;
+        }
+        let target: OpenQuestionItem | undefined;
+        this.store.update((s) => {
+          const list = Array.isArray(s.openQuestions) ? s.openQuestions : [];
+          if (action === 'delete') {
+            s.openQuestions = list.filter((q) => q.id !== id);
+          } else {
+            target = list.find((q) => q.id === id);
+            if (target) {
+              target.status = action === 'resolve' ? 'resolved' : 'open';
+              if (body.resolution !== undefined) {
+                target.resolution = String(body.resolution || '').trim();
+              }
+              target.updatedAt = nowIso;
+            }
+            s.openQuestions = list;
+          }
+        });
+        this.onStateChanged();
+        this.sendJson(res, 200, { ok: true, question: target, questions: this.store.getState().openQuestions || [] });
+        return;
+      }
+
+      const questionText = String(body.question || '').trim();
+      if (!questionText) {
+        this.sendJson(res, 400, { error: 'Missing required field: question' });
+        return;
+      }
+      const reqProjId = String(body.projectId || '').trim();
+      const reqProjName = String(body.projectName || '').trim();
+      const matchedProj =
+        st.projects.find((p) => p.id === reqProjId) ||
+        (reqProjName
+          ? st.projects.find((p) => p.name.trim().toLowerCase() === reqProjName.toLowerCase())
+          : undefined);
+
+      let savedItem!: OpenQuestionItem;
+      this.store.update((s) => {
+        const list = Array.isArray(s.openQuestions) ? s.openQuestions : [];
+        const dup = list.find(
+          (q) => q.status === 'open' && q.question.trim().toLowerCase() === questionText.toLowerCase()
+        );
+        if (dup) {
+          if (body.context) dup.context = String(body.context).trim();
+          if (Array.isArray(body.options)) {
+            dup.options = body.options.map((o) => String(o || '').trim()).filter(Boolean);
+          }
+          dup.updatedAt = nowIso;
+          savedItem = dup;
+        } else {
+          savedItem = {
+            id: `q-${Date.now().toString(36).slice(-5)}`,
+            projectId: matchedProj?.id || reqProjId || undefined,
+            projectName: matchedProj?.name || reqProjName || undefined,
+            question: questionText,
+            context: body.context ? String(body.context).trim() : undefined,
+            options: Array.isArray(body.options)
+              ? body.options.map((o) => String(o || '').trim()).filter(Boolean)
+              : undefined,
+            status: 'open',
+            source: body.source === 'user' || body.source === 'cli' ? body.source : 'muse',
+            createdAt: nowIso,
+            updatedAt: nowIso
+          };
+          list.unshift(savedItem);
+        }
+        s.openQuestions = list.slice(0, 100);
+      });
+      this.onStateChanged();
+      this.sendJson(res, 200, { ok: true, question: savedItem });
+      return;
+    }
+
+    // Explicit Proactive Thought Push API from Muse
+    if (req.method === 'POST' && pathname === '/api/v1/proactive/push') {
+      const body = await this.readBody(req);
+      const text = String(body.text || body.message || '').trim();
+      if (!text) {
+        this.sendJson(res, 400, { error: 'Missing required field: text' });
+        return;
+      }
+      const questionId = body.questionId ? String(body.questionId).trim() : undefined;
+      const options = Array.isArray(body.options)
+        ? body.options.map((o) => String(o || '').trim()).filter(Boolean)
+        : undefined;
+      if (questionId) {
+        this.store.update((s) => {
+          const q = (s.openQuestions || []).find((item) => item.id === questionId);
+          if (q) q.lastAskedAt = new Date().toISOString();
+        });
+      }
+      this.onProactivePush?.({ text, questionId, options });
+      this.sendJson(res, 200, {
+        ok: true,
+        quietHoursActive: isWithinQuietHours(this.store.getState().workflow)
       });
       return;
     }

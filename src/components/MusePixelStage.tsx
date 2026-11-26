@@ -6,6 +6,8 @@ interface MusePixelStageProps {
   museAvatarUrl?: string;
   runningCliIds: string[];
   clis: DetectedCli[];
+  hasUnreadProactive?: boolean;
+  openQuestionCount?: number;
 }
 
 interface Palette {
@@ -80,7 +82,9 @@ const WHIP_SHOUTS = ['快写代码!', '加速!', '*啪!*', '别摸鱼!'];
 export const MusePixelStage: React.FC<MusePixelStageProps> = ({
   museAvatarUrl,
   runningCliIds,
-  clis
+  clis,
+  hasUnreadProactive = false,
+  openQuestionCount = 0
 }) => {
   const [previewMode, setPreviewMode] = useState(false);
   const [hidden, setHidden] = useState(false);
@@ -236,6 +240,23 @@ export const MusePixelStage: React.FC<MusePixelStageProps> = ({
         ctx.fillStyle = '#71717a';
         ctx.font = 'bold 7px monospace';
         ctx.fillText('zZ', mx + 13, y + 2 - (frame % 3));
+      }
+
+      // Proactive thinking pixel lightbulb above Muse when unread proactive thought or open questions exist
+      if (hasUnreadProactive || (openQuestionCount > 0 && frame % 18 < 10)) {
+        const by = y - 9 - (frame % 4 < 2 ? 1 : 0);
+        // Glow halo when unread proactive thought arrived
+        if (hasUnreadProactive && frame % 4 < 2) {
+          ctx.fillStyle = 'rgba(250, 204, 21, 0.35)';
+          ctx.fillRect(mx + 5, by - 1, 8, 8);
+        }
+        // Pixel bulb glass
+        ctx.fillStyle = hasUnreadProactive ? '#facc15' : '#fde047';
+        ctx.fillRect(mx + 7, by, 4, 4);
+        ctx.fillRect(mx + 6, by + 1, 6, 2);
+        // Bulb base
+        ctx.fillStyle = '#52525b';
+        ctx.fillRect(mx + 8, by + 4, 2, 2);
       }
     };
 
@@ -526,7 +547,7 @@ export const MusePixelStage: React.FC<MusePixelStageProps> = ({
     draw();
     const timer = setInterval(draw, 115);
     return () => clearInterval(timer);
-  }, [isWorking, hidden, activeWorkers, palettes, clis]);
+  }, [isWorking, hidden, activeWorkers, palettes, clis, hasUnreadProactive, openQuestionCount]);
 
   if (hidden) {
     return (
