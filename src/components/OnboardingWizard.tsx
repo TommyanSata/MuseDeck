@@ -6,17 +6,25 @@ import {
   ChevronRight,
   Cloud,
   Copy,
+  ExternalLink,
   Loader2,
   Radio,
+  RefreshCw,
   Send,
-  XCircle
+  ShieldCheck,
+  Sparkles
 } from 'lucide-react';
 import {
   CliUserConfig,
+  DecisionPriorityWeights,
   DetectedCli,
   FeishuStatusEvent,
   FmcState,
-  TunnelStatusEvent
+  ModelRoutingMode,
+  PermissionLevel,
+  PlanApprovalMode,
+  TunnelStatusEvent,
+  WorkflowReviewMode
 } from '../types';
 import { CliManagerView } from './CliManagerView';
 import { EmbeddedBrowserSlot } from './EmbeddedBrowserSlot';
@@ -32,6 +40,50 @@ interface OnboardingWizardProps {
   onComplete: () => Promise<void>;
 }
 
+const DEFAULT_WEIGHTS: DecisionPriorityWeights = {
+  capability: 45,
+  price: 25,
+  quota: 20,
+  speed: 10
+};
+
+function rebalanceWeights(
+  current: DecisionPriorityWeights,
+  changedKey: keyof DecisionPriorityWeights,
+  rawNext: number
+): DecisionPriorityWeights {
+  const nextVal = Math.max(0, Math.min(100, Math.round(rawNext)));
+  const remaining = 100 - nextVal;
+  const otherKeys = (['capability', 'price', 'quota', 'speed'] as const).filter(
+    (k) => k !== changedKey
+  );
+  const otherSum = otherKeys.reduce((acc, k) => acc + current[k], 0);
+  const res: DecisionPriorityWeights = { ...current, [changedKey]: nextVal };
+  if (otherSum === 0) {
+    const base = Math.floor(remaining / otherKeys.length);
+    let rem = remaining - base * otherKeys.length;
+    for (const k of otherKeys) {
+      res[k] = base + (rem > 0 ? 1 : 0);
+      if (rem > 0) rem -= 1;
+    }
+    return res;
+  }
+  let assigned = 0;
+  otherKeys.forEach((k, idx) => {
+    if (idx === otherKeys.length - 1) {
+      res[k] = Math.max(0, remaining - assigned);
+    } else {
+      const share = Math.min(
+        remaining - assigned,
+        Math.max(0, Math.round((current[k] / otherSum) * remaining))
+      );
+      res[k] = share;
+      assigned += share;
+    }
+  });
+  return res;
+}
+
 export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
   state,
   clis,
@@ -41,7 +93,7 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
   onSaveCliConfig,
   onComplete
 }) => {
-  const [step, setStep] = useState<1 | 2 | 3>(1);
+  const [step, setStep] = useState<1 | 2 | 3 | 4 | 5>(1);
   const [appId, setAppId] = useState(state.feishu.appId || '');
   const [appSecret, setAppSecret] = useState(state.feishu.appSecret || '');
   const [museUrl, setMuseUrl] = useState(state.muse.webUrl || 'https://muse.ai');
@@ -49,8 +101,29 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
   const [tunnelStatus, setTunnelStatus] = useState<TunnelStatusEvent>({ state: 'stopped' });
   const [copiedKey, setCopiedKey] = useState('');
   const [connecting, setConnecting] = useState(false);
-  const [syncingBrief, setSyncingBrief] = useState(false);
-  const [syncTip, setSyncTip] = useState('');
+
+  // Workflow & decision policy states (Step 3)
+  const [permLevel, setPermLevel] = useState<PermissionLevel>(state.permissionLevel || 'auto');
+  const [planMode, setPlanMode] = useState<PlanApprovalMode>(
+    state.workflow?.planApprovalMode || 'adaptive'
+  );
+  const [routingMode, setRoutingMode] = useState<ModelRoutingMode>(
+    state.workflow?.modelRoutingMode || 'muse_ask'
+  );
+  const [reviewMode, setReviewMode] = useState<WorkflowReviewMode>(
+    state.workflow?.reviewMode || 'muse_review'
+  );
+  const [tokenBudget, setTokenBudget] = useState<number>(state.workflow?.tokenBudget ?? 150000);
+  const [weights, setWeights] = useState<DecisionPriorityWeights>({
+    ...DEFAULT_WEIGHTS,
+    ...(state.workflow?.decisionWeights || {})
+  });
+
+  // Step 5 Muse pre-flight permission handshake states
+  const [testingPerm, setTestingPerm] = useState(false);
+  const [permTip, setPermTip] = useState('');
+  const [syncingAvatar, setSyncingAvatar] = useState(false);
+  const [avatarTip, setAvatarTip] = useState('');
 
   useEffect(() => {
     void window.fmc.getTunnelStatus().then((st) => {
@@ -65,24 +138,10 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
     return () => off();
   }, []);
 
-  const handleToggleTunnel = async () => {
-    if (tunnelStatus.state === 'running' || tunnelStatus.state === 'starting') {
-      const st = await window.fmc.stopTunnel();
-      setTunnelStatus(st);
-    } else {
-      setTunnelStatus({
-        state: 'starting',
-        mode: 'tailscale',
-        message: '正在启动内嵌 Tailscale 永久 443 域名...'
-      });
-      const st = await window.fmc.startTailscaleTunnel();
-      setTunnelStatus(st);
-      if (st.url) setTunnelUrl(st.url);
-    }
-  };
-
-  const isVerified = Boolean(feishuStatus.verified || state.feishu.verified);
+  const isFeishuVerified = Boolean(feishuStatus.verified || state.feishu.verified);
   const enabledCount = clis.filter((c) => c.config.enabled).length;
+  const isTunnelReady = Boolean(tunnelStatus.state === 'running' || tunnelUrl.trim());
+  const isMuseVerified = Boolean(state.muse.tunnelVerified);
 
   const copyText = async (key: string, text: string) => {
     await navigator.clipboard.writeText(text);
@@ -99,40 +158,85 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
     }
   };
 
+  const handleToggleTailscale = async () => {
+    if (tunnelStatus.state === 'running' || tunnelStatus.state === 'starting') {
+      const st = await window.fmc.stopTunnel();
+      setTunnelStatus(st);
+    } else {
+      setTunnelStatus({
+        state: 'starting',
+        mode: 'tailscale',
+        message: '正在启动内嵌 Tailscale 永久 443 域名...'
+      });
+      const st = await window.fmc.startTailscaleTunnel();
+      setTunnelStatus(st);
+      if (st.url) setTunnelUrl(st.url);
+    }
+  };
+
+  const handleStartServeo = async () => {
+    setTunnelStatus({
+      state: 'starting',
+      mode: 'serveo',
+      message: '正在连接免注册 Serveo 443 HTTPS 隧道...'
+    });
+    const st = await window.fmc.startServeoTunnel();
+    setTunnelStatus(st);
+    if (st.url) setTunnelUrl(st.url);
+  };
+
+  const handleSaveStep3AndNext = async () => {
+    await window.fmc.setPermissionLevel(permLevel);
+    await window.fmc.updateWorkflowConfig({
+      planApprovalMode: planMode,
+      modelRoutingMode: routingMode,
+      reviewMode,
+      tokenBudget,
+      decisionWeights: weights
+    });
+    goStep(4);
+  };
+
+  const handleTriggerPreflight = async () => {
+    if (testingPerm) return;
+    setTestingPerm(true);
+    setPermTip('正在同步最新协议并让 Muse 发起连通性握手...');
+    try {
+      await window.fmc.updateControlApi({ tunnelUrl });
+      const res = await window.fmc.testMuseSitePermission();
+      setPermTip(res.message);
+    } finally {
+      setTestingPerm(false);
+    }
+  };
+
+  const handleAutoClickAllow = async () => {
+    const res = await window.fmc.autoClickMuseAlwaysAllow();
+    setPermTip(res.message);
+  };
+
   const handleCopyBrief = async () => {
     await window.fmc.updateControlApi({ tunnelUrl });
     const brief = await window.fmc.getMuseBrief();
     await copyText('brief', brief);
   };
 
-  const handleSyncBriefDirect = async () => {
-    if (syncingBrief) return;
-    setSyncingBrief(true);
-    setSyncTip('正在同步...');
-    try {
-      await window.fmc.updateControlApi({ tunnelUrl });
-      const res = await window.fmc.syncTunnelToMuse();
-      setSyncTip(res.message);
-      setTimeout(() => setSyncTip(''), 3500);
-    } finally {
-      setSyncingBrief(false);
-    }
-  };
-
-  const goStep = (next: 1 | 2 | 3) => {
+  const goStep = (next: 1 | 2 | 3 | 4 | 5) => {
     void window.fmc.hideEmbeddedViews();
     setStep(next);
   };
 
   const steps = [
-    { num: 1 as const, label: '飞书桥接', done: isVerified },
-    { num: 2 as const, label: '本地 CLI', done: enabledCount > 0 },
-    { num: 3 as const, label: 'Muse 与隧道', done: tunnelStatus.state === 'running' }
+    { num: 1 as const, label: '本地 CLI', done: enabledCount > 0 },
+    { num: 2 as const, label: '飞书机器人', done: isFeishuVerified },
+    { num: 3 as const, label: '决策与预算', done: step > 3 },
+    { num: 4 as const, label: '公网隧道', done: isTunnelReady },
+    { num: 5 as const, label: 'Muse 权限预检', done: isMuseVerified }
   ];
 
   return (
     <div className="flex h-screen flex-col bg-white text-[#111827] select-none">
-      {/* Unified Minimalist Codex Header */}
+      {/* Unified Minimalist Top Header */}
       <header className="flex h-12 shrink-0 items-center justify-between border-b border-[#eaecef] bg-white px-5">
         <div className="flex items-center gap-2.5">
           <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-[#18181b] text-[12px] font-bold text-white">
@@ -143,20 +247,20 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
               MuseDeck
             </span>
             <span className="rounded-md bg-[#f4f4f5] px-2 py-0.5 text-[11px] font-medium text-[#71717a]">
-              初始配置
+              初始配置向导
             </span>
           </div>
         </div>
 
-        {/* Segmented Stepper */}
-        <div className="flex items-center rounded-xl bg-[#f4f4f5] p-1 text-[12px]">
+        {/* 5-Step Segmented Stepper */}
+        <div className="flex items-center rounded-xl bg-[#f4f4f5] p-1 text-[11.5px]">
           {steps.map((item) => {
             const active = step === item.num;
             return (
               <button
                 key={item.num}
                 onClick={() => goStep(item.num)}
-                className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-1 font-medium transition-all ${
+                className={`inline-flex items-center gap-1.5 rounded-lg px-2.5 py-1 font-medium transition-all ${
                   active
                     ? 'bg-white text-[#111827] shadow-2xs'
                     : 'text-[#71717a] hover:text-[#111827]'
@@ -187,16 +291,54 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
         </button>
       </header>
 
-      {/* Main Edge-to-Edge Content */}
+      {/* Main Content */}
       <div className="min-h-0 flex-1 overflow-hidden select-text">
+        {/* ================= STEP 1: LOCAL CLIs & MODEL SCANNING ================= */}
         {step === 1 && (
+          <div className="flex h-full flex-col bg-white">
+            <div className="min-h-0 flex-1 overflow-y-auto px-6 py-6">
+              <div className="mx-auto max-w-[940px]">
+                <div className="mb-4">
+                  <h2 className="text-[15px] font-semibold text-[#111827]">
+                    第 1 步：选择并配置本机 AI 编程 CLI（沙箱隔离，不改本机原配置）
+                  </h2>
+                  <p className="mt-1 text-[12px] text-[#71717a]">
+                    勾选你要启用的 CLI，点击卡片上的「配置」可扫描订阅/API 可用模型（支持 Codex 订阅实时拉取、Antigravity 实时扫描）、设定职能权重与计费类型。
+                  </p>
+                </div>
+                <CliManagerView
+                  clis={clis}
+                  scanning={scanning}
+                  onRescan={onRescanClis}
+                  onSaveConfig={onSaveCliConfig}
+                  compact
+                />
+              </div>
+            </div>
+
+            <div className="flex shrink-0 items-center justify-between border-t border-[#eaecef] bg-white px-6 py-3">
+              <span className="text-[12px] text-[#71717a]">
+                当前已启用 <strong className="text-[#111827]">{enabledCount}</strong> 个本地 CLI
+              </span>
+              <button
+                onClick={() => goStep(2)}
+                className="inline-flex items-center gap-1.5 rounded-xl bg-[#18181b] px-4 py-2 text-[12.5px] font-medium text-white transition-colors hover:bg-[#27272a]"
+              >
+                下一步：配置飞书机器人
+                <ChevronRight className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* ================= STEP 2: FEISHU BOT ================= */}
+        {step === 2 && (
           <div className="grid h-full grid-cols-12">
-            {/* Left: Embedded Feishu Browser */}
             <div className="col-span-7 h-full border-r border-[#eaecef]">
               <EmbeddedBrowserSlot
                 target="feishu"
                 initialUrl="https://open.feishu.cn/app"
-                visible={step === 1}
+                visible={step === 2}
                 presets={[
                   { label: '飞书开放平台', url: 'https://open.feishu.cn/app' },
                   { label: '飞书网页版', url: 'https://www.feishu.cn/messenger/' }
@@ -204,27 +346,25 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
               />
             </div>
 
-            {/* Right: Clean Guided Setup + Credentials */}
             <div className="col-span-5 flex h-full flex-col overflow-hidden bg-[#fafafa]">
               <div className="flex-1 space-y-4 overflow-y-auto p-5">
-                {/* Credentials & Live Status Card */}
                 <section className="rounded-2xl border border-[#eaecef] bg-white p-4">
                   <div className="mb-3 flex items-center justify-between">
                     <h2 className="text-[13.5px] font-semibold text-[#111827]">飞书机器人凭证</h2>
                     <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-[#52525b]">
                       <span
                         className={`h-1.5 w-1.5 rounded-full ${
-                          isVerified
+                          isFeishuVerified
                             ? 'bg-emerald-500'
                             : feishuStatus.state === 'connected'
                               ? 'animate-pulse bg-amber-500'
                               : 'bg-[#d4d4d8]'
                         }`}
                       />
-                      {isVerified
-                        ? '已验通'
+                      {isFeishuVerified
+                        ? '已双向验通'
                         : feishuStatus.state === 'connected'
-                          ? '长连接监听中'
+                          ? '长连接在线（待发消息验通）'
                           : '未连接'}
                     </span>
                   </div>
@@ -239,7 +379,7 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
                           value={appId}
                           onChange={(e) => setAppId(e.target.value)}
                           placeholder="cli_a1b2c3..."
-                          className="w-full rounded-xl border border-[#e4e4e7] bg-white px-3 py-1.5 text-[12px] text-[#111827] outline-none transition-colors focus:border-[#18181b]"
+                          className="w-full rounded-xl border border-[#e4e4e7] bg-white px-3 py-1.5 text-[12px] text-[#111827] outline-none focus:border-[#18181b]"
                         />
                       </div>
                       <div>
@@ -251,149 +391,530 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
                           value={appSecret}
                           onChange={(e) => setAppSecret(e.target.value)}
                           placeholder="粘贴 App Secret"
-                          className="w-full rounded-xl border border-[#e4e4e7] bg-white px-3 py-1.5 text-[12px] text-[#111827] outline-none transition-colors focus:border-[#18181b]"
+                          className="w-full rounded-xl border border-[#e4e4e7] bg-white px-3 py-1.5 text-[12px] text-[#111827] outline-none focus:border-[#18181b]"
                         />
                       </div>
                     </div>
 
                     <button
                       onClick={() => void handleConnectFeishu()}
-                      disabled={connecting}
-                      className="flex w-full items-center justify-center gap-2 rounded-xl bg-[#18181b] px-4 py-2 text-[12.5px] font-medium text-white transition-colors hover:bg-[#27272a] disabled:opacity-50"
+                      disabled={!appId.trim() || !appSecret.trim() || connecting}
+                      className="inline-flex w-full items-center justify-center gap-1.5 rounded-xl bg-[#18181b] px-4 py-2 text-[12.5px] font-medium text-white transition-colors hover:bg-[#27272a] disabled:opacity-40"
                     >
                       {connecting ? (
                         <Loader2 className="h-3.5 w-3.5 animate-spin" />
                       ) : (
                         <Radio className="h-3.5 w-3.5" />
                       )}
-                      连接飞书长连接并监听验证
+                      连接飞书长连接（无需公网服务器）
                     </button>
 
-                    {/* Live Verification Banner */}
                     <div
-                      className={`rounded-xl border px-3 py-2.5 text-[11.5px] transition-colors ${
-                        isVerified
+                      className={`rounded-xl border px-3 py-2 text-[11.5px] ${
+                        isFeishuVerified
                           ? 'border-emerald-200 bg-emerald-50/70 text-emerald-900'
                           : feishuStatus.state === 'connected'
                             ? 'border-amber-200 bg-amber-50/70 text-amber-900'
-                            : feishuStatus.state === 'error'
-                              ? 'border-red-200 bg-red-50/70 text-red-800'
-                              : 'border-[#f1f1f3] bg-[#fafafa] text-[#71717a]'
+                            : 'border-[#eaecef] bg-[#fafafa] text-[#71717a]'
                       }`}
                     >
-                      <div className="flex items-center gap-2 font-medium">
-                        {isVerified ? (
-                          <>
-                            <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-600" />
-                            连通验证通过！已收到你的飞书测试消息
-                          </>
-                        ) : feishuStatus.state === 'connected' ? (
-                          <>
-                            <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-amber-600" />
-                            长连接已就绪：现在给飞书机器人发一句「你好」即可自动验通
-                          </>
-                        ) : (
-                          <>
-                            <Radio className="h-3.5 w-3.5 shrink-0 text-[#a1a1aa]" />
-                            {feishuStatus.message || '等待填入 App ID / Secret 后点击连接'}
-                          </>
-                        )}
-                      </div>
-                      {(feishuStatus.lastPing?.text || state.feishu.lastPingMessage) && (
-                        <div className="mt-1.5 rounded-lg bg-white/80 px-2.5 py-1 text-[11px] text-[#3f3f46]">
-                          收到内容：「{feishuStatus.lastPing?.text || state.feishu.lastPingMessage}」
-                        </div>
-                      )}
+                      {isFeishuVerified
+                        ? '飞书双向收发已验证通过！后续外出时用手机飞书发需求即可。'
+                        : feishuStatus.state === 'connected'
+                          ? '长连接已在线：完成下方第 5、6 步发布后，给机器人私聊发一句「你好」即可自动验通。'
+                          : feishuStatus.message || '请参照下方 6 步详细指引创建应用并填入 App ID / Secret'}
                     </div>
                   </div>
                 </section>
 
-                {/* Auto-Detect Interactive 6-Step Guide */}
                 <FeishuSetupGuide
                   feishuConnected={feishuStatus.state === 'connected'}
-                  feishuVerified={isVerified}
+                  feishuVerified={isFeishuVerified}
                   appId={appId}
                   appSecret={appSecret}
                   onNavigateFeishuUrl={(url) => void window.fmc.navigateEmbeddedView('feishu', url)}
                 />
               </div>
 
-              {/* Sticky Footer */}
               <div className="flex shrink-0 items-center justify-between border-t border-[#eaecef] bg-white px-5 py-3">
                 <button
-                  onClick={() => goStep(2)}
-                  className="text-[12px] text-[#8a8f98] transition-colors hover:text-[#111827]"
+                  onClick={() => goStep(1)}
+                  className="inline-flex items-center gap-1.5 rounded-xl border border-[#e4e4e7] bg-white px-3.5 py-2 text-[12.5px] font-medium text-[#52525b] hover:bg-[#f4f4f5]"
                 >
-                  暂跳过飞书
+                  <ArrowLeft className="h-3.5 w-3.5" />
+                  上一步
                 </button>
-                <button
-                  onClick={() => goStep(2)}
-                  className="inline-flex items-center gap-1.5 rounded-xl bg-[#18181b] px-4 py-2 text-[12.5px] font-medium text-white transition-colors hover:bg-[#27272a]"
-                >
-                  下一步：配置本地 CLI
-                  <ChevronRight className="h-3.5 w-3.5" />
-                </button>
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={() => goStep(3)}
+                    className="text-[12px] text-[#8a8f98] hover:text-[#111827]"
+                  >
+                    暂跳过飞书
+                  </button>
+                  <button
+                    onClick={() => goStep(3)}
+                    className="inline-flex items-center gap-1.5 rounded-xl bg-[#18181b] px-4 py-2 text-[12.5px] font-medium text-white hover:bg-[#27272a]"
+                  >
+                    下一步：决策与预算策略
+                    <ChevronRight className="h-3.5 w-3.5" />
+                  </button>
+                </div>
               </div>
             </div>
           </div>
         )}
 
-        {step === 2 && (
-          <div className="flex h-full flex-col bg-white">
+        {/* ================= STEP 3: WORKFLOW, ROUTING & 100% PRIORITY WEIGHTS ================= */}
+        {step === 3 && (
+          <div className="flex h-full flex-col bg-[#fafafa]">
             <div className="min-h-0 flex-1 overflow-y-auto px-6 py-6">
-              <div className="mx-auto max-w-[940px]">
-                <div className="mb-4 flex items-center justify-between">
-                  <div>
-                    <h2 className="text-[15px] font-semibold text-[#111827]">
-                      选择并启用本地 AI 编程 CLI
-                    </h2>
-                    <p className="mt-0.5 text-[12px] text-[#71717a]">
-                      支持一键安装、检测更新与配置独立职能权重；所有配置均保存在 FMC 沙箱中，不修改本机原配置。
-                    </p>
-                  </div>
+              <div className="mx-auto max-w-[820px] space-y-4 text-[12.5px]">
+                <div>
+                  <h2 className="text-[15px] font-semibold text-[#111827]">
+                    第 3 步：设定 Muse 智能决策、审批与预算护栏（进入软件后可随时在「软件设置」修改）
+                  </h2>
+                  <p className="mt-0.5 text-[12px] text-[#71717a]">
+                    决定 Muse 如何为你确认方案、如何为每个子任务挑选最划算的模型，以及单次任务的预算上限。
+                  </p>
                 </div>
-                <CliManagerView
-                  clis={clis}
-                  scanning={scanning}
-                  onRescan={onRescanClis}
-                  onSaveConfig={onSaveCliConfig}
-                  compact
-                />
+
+                {/* 1. Pre-execution approval */}
+                <section className="rounded-2xl border border-[#eaecef] bg-white p-4">
+                  <div className="font-semibold text-[#111827]">1. 执行前方案审批策略</div>
+                  <p className="mt-0.5 text-[11.5px] text-[#71717a]">
+                    每次收到新需求先确认所属项目，随后按以下策略决定是否等你批准方案再派单
+                  </p>
+                  <div className="mt-3 grid grid-cols-1 gap-2.5 sm:grid-cols-3">
+                    {(
+                      [
+                        {
+                          id: 'adaptive',
+                          title: '用户习惯（自适应·推荐）',
+                          desc: '结合任务复杂度与你沉淀的习惯自主决定先报方案还是直接做'
+                        },
+                        {
+                          id: 'always',
+                          title: '总是先报方案等批准',
+                          desc: '硬门控：每次必须经你批准分工与方案后才允许调用本地 CLI'
+                        },
+                        {
+                          id: 'never',
+                          title: '直接执行（跳过方案审批）',
+                          desc: '确认项目后直接拆单开工，适合追求全自动冲刺'
+                        }
+                      ] as const
+                    ).map((opt) => (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() => setPlanMode(opt.id)}
+                        className={`rounded-xl border p-3 text-left transition-colors ${
+                          planMode === opt.id
+                            ? 'border-[#18181b] bg-[#fafafa]'
+                            : 'border-[#eaecef] hover:bg-[#fafafa]'
+                        }`}
+                      >
+                        <div className="font-medium text-[#111827]">{opt.title}</div>
+                        <div className="mt-0.5 text-[11px] text-[#71717a]">{opt.desc}</div>
+                      </button>
+                    ))}
+                  </div>
+                </section>
+
+                {/* 2. Model & Task Routing + 100% Priority Weights */}
+                <section className="rounded-2xl border border-[#eaecef] bg-white p-4">
+                  <div className="font-semibold text-[#111827]">
+                    2. 项目模型与分工决策 + 100% 优先级权重
+                  </div>
+                  <p className="mt-0.5 text-[11.5px] text-[#71717a]">
+                    支持读取所有已开 CLI 的全量模型池与每日权威榜单，同一个 CLI 下可用不同模型处理不同子任务，并在审阅不达标时递进升档省预算（不改动你的默认配置）
+                  </p>
+                  <div className="mt-3 grid grid-cols-1 gap-2.5 sm:grid-cols-3">
+                    {(
+                      [
+                        {
+                          id: 'muse_ask',
+                          title: 'Muse 问询决策（推荐）',
+                          desc: '对比【你的默认配置】与【Muse 性价比推荐配置】请你二选一'
+                        },
+                        {
+                          id: 'muse_auto',
+                          title: 'Muse 智能决策',
+                          desc: '按子任务专长与下方权重自动匹配最优 CLI + 模型 + 思考等级'
+                        },
+                        {
+                          id: 'user_default',
+                          title: '用户默认设定',
+                          desc: '严格固定使用你在 CLI 管理里设置的默认模型与思考等级'
+                        }
+                      ] as const
+                    ).map((opt) => (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() => setRoutingMode(opt.id)}
+                        className={`rounded-xl border p-3 text-left transition-colors ${
+                          routingMode === opt.id
+                            ? 'border-[#18181b] bg-[#fafafa]'
+                            : 'border-[#eaecef] hover:bg-[#fafafa]'
+                        }`}
+                      >
+                        <div className="font-medium text-[#111827]">{opt.title}</div>
+                        <div className="mt-0.5 text-[11px] text-[#71717a]">{opt.desc}</div>
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* 100% Priority Sliders */}
+                  <div className="mt-3.5 rounded-xl border border-[#eaecef] bg-[#fafafa] p-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-[12px] font-medium text-[#111827]">
+                        决策优先级配比（总计{' '}
+                        <span className="font-mono text-emerald-700">
+                          {weights.capability + weights.price + weights.quota + weights.speed}%
+                        </span>
+                        ）
+                      </span>
+                      <div className="flex gap-1">
+                        {[
+                          { label: '均衡推荐', w: { capability: 45, price: 25, quota: 20, speed: 10 } },
+                          { label: '质量优先', w: { capability: 65, price: 10, quota: 15, speed: 10 } },
+                          { label: '极致省钱', w: { capability: 25, price: 40, quota: 25, speed: 10 } }
+                        ].map((p) => (
+                          <button
+                            key={p.label}
+                            type="button"
+                            onClick={() => setWeights(p.w)}
+                            className="rounded-md border border-[#e4e4e7] bg-white px-2 py-0.5 text-[10.5px] font-medium text-[#52525b] hover:border-[#18181b] hover:text-[#111827]"
+                          >
+                            {p.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="mt-2.5 grid grid-cols-2 gap-2 sm:grid-cols-4">
+                      {(
+                        [
+                          { key: 'capability', label: '模型能力' },
+                          { key: 'price', label: '价格性价比' },
+                          { key: 'quota', label: '剩余额度/限额' },
+                          { key: 'speed', label: '响应速度' }
+                        ] as const
+                      ).map((it) => (
+                        <div
+                          key={it.key}
+                          className="rounded-lg border border-[#eaecef] bg-white px-2.5 py-2"
+                        >
+                          <div className="flex items-center justify-between text-[11.5px]">
+                            <span className="font-medium text-[#3f3f46]">{it.label}</span>
+                            <span className="font-mono font-semibold text-[#111827]">
+                              {weights[it.key]}%
+                            </span>
+                          </div>
+                          <input
+                            type="range"
+                            min={0}
+                            max={100}
+                            step={1}
+                            value={weights[it.key]}
+                            onChange={(e) =>
+                              setWeights(
+                                rebalanceWeights(weights, it.key, Number.parseInt(e.target.value, 10))
+                              )
+                            }
+                            className="mt-1 h-1.5 w-full cursor-pointer accent-[#18181b]"
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </section>
+
+                {/* 3. Review Mode, Permission Level & Token Budget */}
+                <section className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  <div className="rounded-2xl border border-[#eaecef] bg-white p-4">
+                    <div className="font-semibold text-[#111827]">3. 本地 CLI 执行权限等级</div>
+                    <div className="mt-2.5 grid grid-cols-2 gap-1.5">
+                      {(
+                        [
+                          { id: 'auto', label: '自动编辑（推荐）' },
+                          { id: 'turbo', label: 'Turbo 全放行' },
+                          { id: 'default', label: '默认安全确认' },
+                          { id: 'ask_review', label: '只读规划模式' }
+                        ] as const
+                      ).map((p) => (
+                        <button
+                          key={p.id}
+                          type="button"
+                          onClick={() => setPermLevel(p.id)}
+                          className={`rounded-xl border px-2.5 py-2 text-[11.5px] font-medium transition-colors ${
+                            permLevel === p.id
+                              ? 'border-[#18181b] bg-[#18181b] text-white'
+                              : 'border-[#eaecef] bg-[#fafafa] text-[#3f3f46] hover:bg-[#f4f4f5]'
+                          }`}
+                        >
+                          {p.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border border-[#eaecef] bg-white p-4">
+                    <div className="font-semibold text-[#111827]">4. 完工审阅与单次预算护栏</div>
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      {(
+                        [
+                          { id: 'muse_review', label: 'Muse 先审阅再问我' },
+                          { id: 'direct_user', label: '跑完直接问我' },
+                          { id: 'auto_sprint', label: '自动闭环冲刺' }
+                        ] as const
+                      ).map((r) => (
+                        <button
+                          key={r.id}
+                          type="button"
+                          onClick={() => setReviewMode(r.id)}
+                          className={`rounded-lg border px-2.5 py-1 text-[11px] font-medium ${
+                            reviewMode === r.id
+                              ? 'border-[#18181b] bg-[#fafafa] text-[#111827]'
+                              : 'border-[#eaecef] text-[#71717a]'
+                          }`}
+                        >
+                          {r.label}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="mt-2.5 flex items-center justify-between gap-2">
+                      <span className="text-[11.5px] text-[#71717a]">单需求预算上限：</span>
+                      <div className="flex rounded-lg bg-[#f4f4f5] p-0.5">
+                        {[
+                          { v: 50000, l: '50k' },
+                          { v: 150000, l: '150k' },
+                          { v: 300000, l: '300k' },
+                          { v: 0, l: '不限' }
+                        ].map((b) => (
+                          <button
+                            key={b.v}
+                            type="button"
+                            onClick={() => setTokenBudget(b.v)}
+                            className={`rounded-md px-2 py-0.5 font-mono text-[11px] font-medium ${
+                              tokenBudget === b.v ? 'bg-white text-[#111827] shadow-2xs' : 'text-[#71717a]'
+                            }`}
+                          >
+                            {b.l}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </section>
               </div>
             </div>
 
             <div className="flex shrink-0 items-center justify-between border-t border-[#eaecef] bg-white px-6 py-3">
               <button
-                onClick={() => goStep(1)}
-                className="inline-flex items-center gap-1.5 rounded-xl border border-[#e4e4e7] bg-white px-3.5 py-2 text-[12.5px] font-medium text-[#52525b] transition-colors hover:bg-[#f4f4f5] hover:text-[#111827]"
+                onClick={() => goStep(2)}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-[#e4e4e7] bg-white px-3.5 py-2 text-[12.5px] font-medium text-[#52525b] hover:bg-[#f4f4f5]"
               >
                 <ArrowLeft className="h-3.5 w-3.5" />
                 上一步
               </button>
-              <div className="flex items-center gap-3">
-                <span className="text-[12px] text-[#71717a]">
-                  已启用 <strong className="text-[#111827]">{enabledCount}</strong> 个 CLI 节点
-                </span>
-                <button
-                  onClick={() => goStep(3)}
-                  className="inline-flex items-center gap-1.5 rounded-xl bg-[#18181b] px-4 py-2 text-[12.5px] font-medium text-white transition-colors hover:bg-[#27272a]"
-                >
-                  下一步：登录 Muse 与隧道
-                  <ChevronRight className="h-3.5 w-3.5" />
-                </button>
-              </div>
+              <button
+                onClick={() => void handleSaveStep3AndNext()}
+                className="inline-flex items-center gap-1.5 rounded-xl bg-[#18181b] px-4 py-2 text-[12.5px] font-medium text-white hover:bg-[#27272a]"
+              >
+                保存策略，下一步：开启公网隧道
+                <ChevronRight className="h-3.5 w-3.5" />
+              </button>
             </div>
           </div>
         )}
 
-        {step === 3 && (
+        {/* ================= STEP 4: HTTPS 443 TUNNEL WITH DETAILED TAILSCALE GUIDE ================= */}
+        {step === 4 && (
+          <div className="flex h-full flex-col bg-[#fafafa]">
+            <div className="min-h-0 flex-1 overflow-y-auto px-6 py-6">
+              <div className="mx-auto max-w-[740px] space-y-4 text-[12.5px]">
+                <div>
+                  <h2 className="text-[15px] font-semibold text-[#111827]">
+                    第 4 步：开启 443 HTTPS 公网穿透（让云端 Meta Muse 能访问你的本机接口）
+                  </h2>
+                  <p className="mt-0.5 text-[12px] text-[#71717a]">
+                    推荐使用内置的 <strong>Tailscale Funnel</strong>：无需安装客户端、无需云服务器，完成一次免费网页授权即可获得<strong>永久不变的 .ts.net 域名</strong>。
+                  </p>
+                </div>
+
+                <section className="rounded-2xl border border-[#eaecef] bg-white p-5">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <div className="text-[13.5px] font-semibold text-[#111827]">
+                        内嵌 Tailscale 永久 443 隧道
+                      </div>
+                      <div className="mt-0.5 text-[11.5px] text-[#71717a]">
+                        本地控制端口 127.0.0.1:{state.controlApi.port}（带随机 Bearer Token 鉴权保护）
+                      </div>
+                    </div>
+                    <span
+                      className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1 text-[11.5px] font-medium ${
+                        tunnelStatus.state === 'running'
+                          ? 'bg-emerald-50 text-emerald-800 ring-1 ring-emerald-200'
+                          : tunnelStatus.state === 'starting'
+                            ? 'bg-amber-50 text-amber-800 ring-1 ring-amber-200'
+                            : 'bg-[#f4f4f5] text-[#52525b]'
+                      }`}
+                    >
+                      <span
+                        className={`h-2 w-2 rounded-full ${
+                          tunnelStatus.state === 'running'
+                            ? 'bg-emerald-500'
+                            : tunnelStatus.state === 'starting'
+                              ? 'animate-pulse bg-amber-500'
+                              : 'bg-[#a1a1aa]'
+                        }`}
+                      />
+                      {tunnelStatus.state === 'running'
+                        ? '永久域名已在线'
+                        : tunnelStatus.state === 'starting'
+                          ? '等待浏览器网页授权...'
+                          : '尚未启动'}
+                    </span>
+                  </div>
+
+                  <div className="mt-4 flex flex-wrap gap-2.5">
+                    <button
+                      onClick={() => void handleToggleTailscale()}
+                      className={`inline-flex flex-1 items-center justify-center gap-1.5 rounded-xl px-4 py-2.5 text-[12.5px] font-medium transition-colors ${
+                        tunnelStatus.state === 'running' || tunnelStatus.state === 'starting'
+                          ? 'border border-[#e4e4e7] bg-[#f4f4f5] text-[#111827] hover:bg-[#e4e4e7]'
+                          : 'bg-[#18181b] text-white hover:bg-[#27272a]'
+                      }`}
+                    >
+                      {tunnelStatus.state === 'starting' ? (
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                      ) : (
+                        <Cloud className="h-4 w-4" />
+                      )}
+                      {tunnelStatus.state === 'running'
+                        ? '停止内嵌隧道'
+                        : tunnelStatus.state === 'starting'
+                          ? '正在等待网页授权（点击可取消）'
+                          : '一键启动 Tailscale 永久 443 域名（推荐）'}
+                    </button>
+
+                    {tunnelStatus.state !== 'running' && (
+                      <button
+                        type="button"
+                        onClick={() => void handleStartServeo()}
+                        className="rounded-xl border border-[#e4e4e7] bg-white px-3.5 py-2.5 text-[12px] font-medium text-[#52525b] hover:bg-[#f4f4f5] hover:text-[#111827]"
+                        title="无需注册账号的临时备用 HTTPS 隧道"
+                      >
+                        改用免注册临时隧道 (Serveo)
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Active Auth URL Banner */}
+                  {tunnelStatus.authUrl && tunnelStatus.state !== 'running' && (
+                    <div className="mt-3.5 rounded-xl border border-amber-200 bg-amber-50/80 p-3 text-[12px] text-amber-950">
+                      <div className="flex items-center justify-between gap-2 font-semibold">
+                        <span>浏览器已弹出 Tailscale 授权页（若未弹出请点击右侧按钮打开）：</span>
+                        <button
+                          type="button"
+                          onClick={() => void window.fmc.openExternal(tunnelStatus.authUrl!)}
+                          className="inline-flex shrink-0 items-center gap-1 rounded-lg bg-[#18181b] px-2.5 py-1 text-[11px] font-medium text-white hover:bg-[#27272a]"
+                        >
+                          <ExternalLink className="h-3 w-3" />
+                          打开授权网页
+                        </button>
+                      </div>
+                      <div className="mt-1 break-all font-mono text-[11px] text-amber-800">
+                        {tunnelStatus.authUrl}
+                      </div>
+                    </div>
+                  )}
+
+                  {tunnelStatus.message && (
+                    <p
+                      className={`mt-2.5 text-[11.5px] ${
+                        tunnelStatus.state === 'error'
+                          ? 'text-red-600'
+                          : tunnelStatus.state === 'running'
+                            ? 'font-medium text-emerald-700'
+                            : 'text-[#71717a]'
+                      }`}
+                    >
+                      {tunnelStatus.message}
+                    </p>
+                  )}
+
+                  <div className="mt-3">
+                    <label className="mb-1 block text-[11.5px] font-medium text-[#52525b]">
+                      当前公网 HTTPS 地址（成功后自动填入，也可手动粘贴自定义反代域名）：
+                    </label>
+                    <input
+                      value={tunnelUrl}
+                      onChange={(e) => setTunnelUrl(e.target.value)}
+                      placeholder="https://fmc-hub.tailxxxx.ts.net"
+                      className="w-full rounded-xl border border-[#e4e4e7] bg-[#fafafa] px-3 py-2 font-mono text-[12px] text-[#111827] outline-none focus:border-[#18181b] focus:bg-white"
+                    />
+                  </div>
+                </section>
+
+                {/* Detailed Step-by-Step Tailscale Webpage Guide */}
+                <section className="rounded-2xl border border-[#eaecef] bg-white p-5">
+                  <h3 className="text-[13px] font-semibold text-[#111827]">
+                    Tailscale 跳转网页后该怎么操作？（仅首次需操作 1 次，之后永久免操作）
+                  </h3>
+                  <ol className="mt-2.5 list-decimal space-y-2 pl-4 text-[12px] leading-relaxed text-[#52525b]">
+                    <li>
+                      <strong>第 1 个网页（登录并绑定设备）：</strong>点击上方启动按钮后，浏览器会打开{' '}
+                      <code className="rounded bg-[#f4f4f5] px-1">login.tailscale.com/a/...</code>。使用你的{' '}
+                      <strong>Google / GitHub / Microsoft</strong> 账号直接登录（没有账号会自动免费注册个人版），随后点击页面中央的蓝色{' '}
+                      <strong>「Connect」</strong> 按钮，将 <code className="rounded bg-[#f4f4f5] px-1">fmc-hub</code> 接入你的账号。
+                    </li>
+                    <li>
+                      <strong>第 2 个网页（开启 Funnel 公网转发，仅全新账号会弹出）：</strong>绑定后如果浏览器紧接着弹出第二个页面（或上方出现新的授权链接{' '}
+                      <code className="rounded bg-[#f4f4f5] px-1">.../f/funnel</code>），点击页面上的{' '}
+                      <strong>「Enable Funnel」</strong> 按钮开启 443 公网访问。
+                      <div className="mt-1 rounded-lg bg-[#fafafa] px-2.5 py-1.5 text-[11px] text-[#71717a]">
+                        小贴士：如果页面提示需先启用 HTTPS 证书，点击进入 Tailscale 后台顶部的 <strong>DNS</strong> 标签页，滑到底部勾选开启{' '}
+                        <strong>MagicDNS</strong> 与 <strong>Enable HTTPS</strong> 即可。
+                      </div>
+                    </li>
+                    <li>
+                      <strong>自动回填生效：</strong>网页上点完后无需重启软件，等待约 3~8 秒申请免费 TLS 证书，本页上方就会自动变成绿色「<strong>永久域名已在线</strong>」并填好你的专属 <code className="rounded bg-[#f4f4f5] px-1">.ts.net</code> 地址！
+                    </li>
+                  </ol>
+                </section>
+              </div>
+            </div>
+
+            <div className="flex shrink-0 items-center justify-between border-t border-[#eaecef] bg-white px-6 py-3">
+              <button
+                onClick={() => goStep(3)}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-[#e4e4e7] bg-white px-3.5 py-2 text-[12.5px] font-medium text-[#52525b] hover:bg-[#f4f4f5]"
+              >
+                <ArrowLeft className="h-3.5 w-3.5" />
+                上一步
+              </button>
+              <button
+                onClick={() => goStep(5)}
+                className="inline-flex items-center gap-1.5 rounded-xl bg-[#18181b] px-4 py-2 text-[12.5px] font-medium text-white hover:bg-[#27272a]"
+              >
+                下一步：登录 Muse 并预授权站点权限
+                <ChevronRight className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* ================= STEP 5: MUSE LOGIN & SITE PERMISSION PRE-FLIGHT ================= */}
+        {step === 5 && (
           <div className="grid h-full grid-cols-12">
-            {/* Left: Embedded Muse Browser */}
             <div className="col-span-7 h-full border-r border-[#eaecef]">
               <EmbeddedBrowserSlot
                 target="muse"
                 initialUrl={museUrl}
-                visible={step === 3}
+                visible={step === 5}
                 presets={[
                   { label: 'Meta Muse', url: 'https://muse.ai' },
                   { label: '飞书网页版', url: 'https://www.feishu.cn/messenger/' }
@@ -401,22 +922,39 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
               />
             </div>
 
-            {/* Right: Tunnel & Protocol Sync */}
             <div className="col-span-5 flex h-full flex-col overflow-hidden bg-[#fafafa]">
               <div className="flex-1 space-y-4 overflow-y-auto p-5 text-[12.5px]">
-                {/* Card 1: Muse Portal */}
+                {/* Card 1: Muse Login + VPN Tip + Avatar Sync */}
                 <section className="rounded-2xl border border-[#eaecef] bg-white p-4">
-                  <h2 className="text-[13.5px] font-semibold text-[#111827]">1. 登录左侧 Muse 账号</h2>
-                  <p className="mt-1 text-[11.5px] leading-relaxed text-[#71717a]">
-                    在左侧完成一次登录，登录态会持久保存在本地独立分区中，后续在主界面即可使用原生对话窗与动态形象。
-                  </p>
+                  <div className="flex items-center justify-between">
+                    <h2 className="text-[13.5px] font-semibold text-[#111827]">
+                      1. 登录左侧 Meta Muse 账号
+                    </h2>
+                    <button
+                      type="button"
+                      disabled={syncingAvatar}
+                      onClick={async () => {
+                        setSyncingAvatar(true);
+                        try {
+                          const r = await window.fmc.fetchMuseAvatar();
+                          setAvatarTip(r.ok ? '已同步 Muse 形象' : r.message || '');
+                        } finally {
+                          setSyncingAvatar(false);
+                        }
+                      }}
+                      className="inline-flex items-center gap-1 rounded-lg border border-[#e4e4e7] px-2 py-0.5 text-[11px] font-medium text-[#3f3f46] hover:bg-[#f4f4f5]"
+                    >
+                      <RefreshCw className={`h-3 w-3 ${syncingAvatar ? 'animate-spin' : ''}`} />
+                      同步形象
+                    </button>
+                  </div>
                   <div className="mt-2.5 flex items-start gap-1.5 rounded-xl border border-amber-200/80 bg-amber-50/70 px-3 py-2 text-[11px] leading-relaxed text-amber-900">
                     <span className="shrink-0">🌐</span>
                     <span>
-                      <strong>网络提示：</strong>Meta Muse（muse.ai）目前在国内直连网络环境下无法使用。如果左侧网页白屏、一直转圈或加载失败，请先开启 VPN / 代理（推荐开启系统代理或 TUN 模式）后点击刷新。
+                      <strong>网络提示：</strong>Meta Muse（muse.ai）目前在国内直连网络下无法打开。若左侧页面空白或转圈，请先开启 VPN / 代理（推荐开启系统代理或 TUN 模式）再点刷新。
                     </span>
                   </div>
-                  <div className="mt-3 flex gap-2">
+                  <div className="mt-2.5 flex gap-2">
                     <input
                       value={museUrl}
                       onChange={(e) => setMuseUrl(e.target.value)}
@@ -427,174 +965,119 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
                         void window.fmc.updateMuseConfig({ webUrl: museUrl });
                         void window.fmc.navigateEmbeddedView('muse', museUrl);
                       }}
-                      className="rounded-xl border border-[#e4e4e7] bg-white px-3 py-1.5 text-[12px] font-medium text-[#3f3f46] transition-colors hover:bg-[#f4f4f5]"
+                      className="rounded-xl border border-[#e4e4e7] bg-[#fafafa] px-3 py-1.5 text-[12px] font-medium text-[#3f3f46] hover:bg-[#f4f4f5]"
                     >
-                      打开
+                      跳转
                     </button>
                   </div>
+                  {avatarTip && <p className="mt-1.5 text-[11px] text-emerald-700">{avatarTip}</p>}
                 </section>
 
-                {/* Card 2: Embedded Tailscale Permanent 443 Domain */}
-                <section className="rounded-2xl border border-[#eaecef] bg-white p-4">
-                  <div className="flex items-center justify-between">
-                    <h2 className="text-[13.5px] font-semibold text-[#111827]">
-                      2. 开启内嵌 Tailscale 永久 443 域名
+                {/* Card 2: Pre-Flight Protocol Sync + Site Access "Always Allow" Handshake! */}
+                <section className="rounded-2xl border border-[#18181b] bg-white p-4 shadow-2xs">
+                  <div className="flex items-center justify-between gap-2">
+                    <h2 className="flex items-center gap-1.5 text-[13.5px] font-semibold text-[#111827]">
+                      <ShieldCheck className="h-4 w-4 text-[#18181b]" />
+                      2. 发送协议并提前授权「总是允许此站点」（关键！）
                     </h2>
-                    {tunnelStatus.state === 'running' && (
-                      <span className="inline-flex items-center gap-1 text-[11px] font-medium text-emerald-600">
-                        <CheckCircle2 className="h-3.5 w-3.5" />
-                        在线
+                    {isMuseVerified && (
+                      <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10.5px] font-semibold text-emerald-800">
+                        已打通
                       </span>
                     )}
                   </div>
-                  <p className="mt-1 text-[11.5px] leading-relaxed text-[#71717a]">
-                    免装客户端、重启不换域名，云端 Muse 只需批准一次「总是允许此站点」即可永久直连本机。
+                  <p className="mt-1 text-[11.5px] leading-relaxed text-[#52525b]">
+                    为了防止正式派发飞书任务时被 Muse 的「外部站点访问权限确认框」打断导致指令冲突，请在这里提前完成一次性授权握手：
                   </p>
+
+                  <ol className="mt-2.5 list-decimal space-y-1.5 pl-4 text-[11.5px] text-[#3f3f46]">
+                    <li>先确保左侧已登录进入与 Muse 的聊天对话框；</li>
+                    <li>点击下方黑色按钮「<strong>发送协议并触发站点权限预检</strong>」；</li>
+                    <li>
+                      观察左侧 Muse 聊天框：当它弹出询问是否允许访问你的 <code className="rounded bg-[#f4f4f5] px-1">.ts.net</code> 域名时，点击 <strong>「总是允许此站点」</strong>（也可点下方辅助按钮自动帮你点）！
+                    </li>
+                  </ol>
 
                   <div className="mt-3 space-y-2">
-                    <input
-                      value={tunnelUrl}
-                      onChange={(e) => setTunnelUrl(e.target.value)}
-                      placeholder="https://fmc-hub.tailxxxx.ts.net"
-                      className="w-full rounded-xl border border-[#e4e4e7] bg-white px-3 py-1.5 font-mono text-[11.5px] text-[#111827] outline-none focus:border-[#18181b]"
-                    />
-
-                    <button
-                      onClick={() => void handleToggleTunnel()}
-                      disabled={tunnelStatus.state === 'starting'}
-                      className={`inline-flex w-full items-center justify-center gap-1.5 rounded-xl px-4 py-2 text-[12.5px] font-medium text-white transition-colors disabled:opacity-60 ${
-                        tunnelStatus.state === 'running'
-                          ? 'bg-red-600 hover:bg-red-700'
-                          : 'bg-[#18181b] hover:bg-[#27272a]'
-                      }`}
-                    >
-                      {tunnelStatus.state === 'starting' ? (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      ) : tunnelStatus.state === 'running' ? (
-                        <XCircle className="h-3.5 w-3.5" />
-                      ) : (
-                        <Cloud className="h-3.5 w-3.5" />
-                      )}
-                      {tunnelStatus.state === 'starting'
-                        ? '正在建立永久域名...'
-                        : tunnelStatus.state === 'running'
-                          ? '停止内嵌 Tailscale 域名'
-                          : '一键启动内嵌 Tailscale 永久域名'}
-                    </button>
-
-                    {tunnelStatus.authUrl && tunnelStatus.state === 'starting' && (
-                      <div className="rounded-xl border border-[#e4e4e7] bg-[#fafafa] p-2.5 text-[11px] text-[#3f3f46]">
-                        <div>请在浏览器完成一次性 Tailscale 授权：</div>
-                        <button
-                          onClick={() => void window.fmc.openExternal(tunnelStatus.authUrl!)}
-                          className="mt-1 break-all font-mono text-[#111827] underline"
-                        >
-                          {tunnelStatus.authUrl}
-                        </button>
-                      </div>
-                    )}
-
-                    {tunnelStatus.message && (
-                      <p
-                        className={`text-[11px] ${
-                          tunnelStatus.state === 'error'
-                            ? 'text-red-600'
-                            : tunnelStatus.state === 'running'
-                              ? 'text-emerald-700'
-                              : 'text-[#71717a]'
-                        }`}
+                    <div className="flex gap-2">
+                      <button
+                        type="button"
+                        onClick={() => void handleTriggerPreflight()}
+                        disabled={testingPerm}
+                        className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-xl bg-[#18181b] px-3.5 py-2 text-[12px] font-medium text-white transition-colors hover:bg-[#27272a] disabled:opacity-50"
                       >
-                        {tunnelStatus.message}
-                      </p>
-                    )}
-                  </div>
-                </section>
+                        {testingPerm ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <Send className="h-3.5 w-3.5" />
+                        )}
+                        发送协议并触发站点权限预检
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void handleCopyBrief()}
+                        className="inline-flex items-center gap-1 rounded-xl border border-[#e4e4e7] bg-white px-3 py-2 text-[11.5px] font-medium text-[#3f3f46] hover:bg-[#f4f4f5]"
+                        title="手动复制协议备用"
+                      >
+                        {copiedKey === 'brief' ? (
+                          <Check className="h-3.5 w-3.5 text-emerald-600" />
+                        ) : (
+                          <Copy className="h-3.5 w-3.5" />
+                        )}
+                        复制协议
+                      </button>
+                    </div>
 
-                {/* Card 3: Sync Protocol to Muse */}
-                <section className="rounded-2xl border border-[#eaecef] bg-white p-4">
-                  <h2 className="text-[13.5px] font-semibold text-[#111827]">
-                    3. 将调度协议同步给 Muse
-                  </h2>
-                  <p className="mt-1 text-[11.5px] leading-relaxed text-[#71717a]">
-                    包含本地 API 地址、Token、各 CLI 职能权重及自动闭环规则；后续任何配置修改都会自动同步给 Muse。
-                  </p>
-                  <div className="mt-3 flex gap-2">
                     <button
-                      onClick={() => void handleSyncBriefDirect()}
-                      disabled={syncingBrief}
-                      className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-xl bg-[#18181b] px-3.5 py-2 text-[12px] font-medium text-white transition-colors hover:bg-[#27272a] disabled:opacity-50"
+                      type="button"
+                      onClick={() => void handleAutoClickAllow()}
+                      className="inline-flex w-full items-center justify-center gap-1.5 rounded-xl border border-[#e4e4e7] bg-[#fafafa] px-3 py-1.5 text-[11.5px] font-medium text-[#3f3f46] transition-colors hover:border-[#18181b] hover:bg-white hover:text-[#111827]"
                     >
-                      {syncingBrief ? (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      ) : (
-                        <Send className="h-3.5 w-3.5" />
-                      )}
-                      {syncTip || '一键发送给左侧 Muse'}
-                    </button>
-                    <button
-                      onClick={() => void handleCopyBrief()}
-                      className="inline-flex items-center gap-1 rounded-xl border border-[#e4e4e7] bg-white px-3 py-2 text-[12px] font-medium text-[#3f3f46] transition-colors hover:bg-[#f4f4f5]"
-                    >
-                      {copiedKey === 'brief' ? (
-                        <Check className="h-3.5 w-3.5 text-emerald-600" />
-                      ) : (
-                        <Copy className="h-3.5 w-3.5" />
-                      )}
-                      {copiedKey === 'brief' ? '已复制' : '复制'}
+                      <Sparkles className="h-3.5 w-3.5" />
+                      若左侧已弹出权限询问，点此自动点击「总是允许此站点」
                     </button>
                   </div>
-                </section>
-                {/* Card 4: Quick Tour of Key Controls in Settings */}
-                <section className="rounded-2xl border border-[#eaecef] bg-white p-4">
-                  <h2 className="text-[13.5px] font-semibold text-[#111827]">
-                    4. 进入后可在「软件设置」自由调控的核心能力
-                  </h2>
-                  <p className="mt-1 text-[11.5px] leading-relaxed text-[#71717a]">
-                    完成引导后，你可以随时在左下角「软件设置」与左侧项目右键菜单中精细定制：
-                  </p>
-                  <div className="mt-2.5 grid grid-cols-1 gap-2 text-[11.5px]">
-                    <div className="rounded-xl border border-[#f1f1f3] bg-[#fafafa] px-3 py-2">
-                      <div className="font-medium text-[#111827]">两段式前置审批 + 用户习惯学习</div>
-                      <div className="mt-0.5 text-[#71717a]">
-                        先确认项目归属，再确认执行方案；支持「用户习惯自适应 / 总是审批 / 直接执行」三档切换。
+
+                  {permTip && (
+                    <p className="mt-2 text-[11px] leading-relaxed text-[#52525b]">{permTip}</p>
+                  )}
+
+                  <div
+                    className={`mt-3 rounded-xl border px-3 py-2.5 text-[11.5px] ${
+                      isMuseVerified
+                        ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
+                        : 'border-[#eaecef] bg-[#fafafa] text-[#71717a]'
+                    }`}
+                  >
+                    {isMuseVerified ? (
+                      <div className="flex items-center gap-1.5 font-medium">
+                        <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600" />
+                        <span>
+                          双向握手验证成功！本机已收到 Muse 发来的真实 API 请求，「总是允许此站点」已永久生效，现在进入工作台即可顺畅使用！
+                        </span>
                       </div>
-                    </div>
-                    <div className="rounded-xl border border-[#f1f1f3] bg-[#fafafa] px-3 py-2">
-                      <div className="font-medium text-[#111827]">项目模型与分工决策 + 100% 优先级权重</div>
-                      <div className="mt-0.5 text-[#71717a]">
-                        每日自动拉取权威评测榜单，按「能力 / 价格 / 剩余额度 / 速度」百分比权重为子任务匹配最擅长模型，不达标时递进升档省预算。
-                      </div>
-                    </div>
-                    <div className="rounded-xl border border-[#f1f1f3] bg-[#fafafa] px-3 py-2">
-                      <div className="font-medium text-[#111827]">右键项目管理 & 本地 CLI 历史续聊</div>
-                      <div className="mt-0.5 text-[#71717a]">
-                        右键任意项目可独立限定可用 CLI、编辑简介、导入 Codex/Claude 本地历史并原生 --resume 远程续开发。
-                      </div>
-                    </div>
-                    <div className="rounded-xl border border-[#f1f1f3] bg-[#fafafa] px-3 py-2">
-                      <div className="font-medium text-[#111827]">一键同步 Muse 形象为桌面图标</div>
-                      <div className="mt-0.5 text-[#71717a]">
-                        在「外观与字体」中可随时将当前 Muse 造型裁剪为无留白桌面与托盘图标。
-                      </div>
-                    </div>
+                    ) : (
+                      <span>
+                        等待 Muse 访问本机接口验证中……一旦你在左侧点完「总是允许此站点」，此处会自动变绿。
+                      </span>
+                    )}
                   </div>
                 </section>
               </div>
 
-              {/* Sticky Footer */}
               <div className="flex shrink-0 items-center justify-between border-t border-[#eaecef] bg-white px-5 py-3">
                 <button
-                  onClick={() => goStep(2)}
-                  className="inline-flex items-center gap-1.5 rounded-xl border border-[#e4e4e7] bg-white px-3.5 py-2 text-[12.5px] font-medium text-[#52525b] transition-colors hover:bg-[#f4f4f5] hover:text-[#111827]"
+                  onClick={() => goStep(4)}
+                  className="inline-flex items-center gap-1.5 rounded-xl border border-[#e4e4e7] bg-white px-3.5 py-2 text-[12.5px] font-medium text-[#52525b] hover:bg-[#f4f4f5]"
                 >
                   <ArrowLeft className="h-3.5 w-3.5" />
                   上一步
                 </button>
                 <button
                   onClick={() => void onComplete()}
-                  className="inline-flex items-center gap-1.5 rounded-xl bg-[#18181b] px-5 py-2 text-[12.5px] font-medium text-white transition-colors hover:bg-[#27272a]"
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-[#18181b] px-5 py-2 text-[12.5px] font-medium text-white hover:bg-[#27272a]"
                 >
-                  完成配置，进入工作台
+                  完成配置，进入 MuseDeck
                   <ChevronRight className="h-3.5 w-3.5" />
                 </button>
               </div>

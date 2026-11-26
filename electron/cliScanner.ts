@@ -667,20 +667,30 @@ function readLocalCliHints(cliId: string): {
         if (bMatch) baseUrl = bMatch[1];
         sources.push('~/.codex/config.toml');
       }
-      const auth = readJsonSafe<{ OPENAI_API_KEY?: string }>(path.join(home, '.codex', 'auth.json'));
+      const auth = readJsonSafe<{ OPENAI_API_KEY?: string; tokens?: Record<string, unknown> }>(
+        path.join(home, '.codex', 'auth.json')
+      );
       if (auth?.OPENAI_API_KEY) apiKey = auth.OPENAI_API_KEY;
 
-      const cache = readJsonSafe<{
-        models?: Array<{ slug?: string; id?: string; visibility?: string }>;
-      }>(path.join(home, '.codex', 'models_cache.json'));
-      if (cache?.models?.length) {
-        for (const item of cache.models) {
-          if (item.visibility === 'hide') continue;
-          if (item.slug) models.push(item.slug);
-          else if (item.id) models.push(item.id);
+      for (const cacheFile of ['models_cache.json', 'cc-switch-model-catalog.json']) {
+        const cache = readJsonSafe<{
+          models?: Array<{ slug?: string; id?: string; visibility?: string }>;
+        }>(path.join(home, '.codex', cacheFile));
+        if (cache?.models?.length) {
+          for (const item of cache.models) {
+            if (item.visibility === 'hide') continue;
+            if (item.slug) models.push(item.slug);
+            else if (item.id) models.push(item.id);
+          }
+          sources.push(`~/.codex/${cacheFile}`);
         }
-        sources.push('~/.codex/models_cache.json');
       }
+
+      const globalState = readJsonSafe<{ model?: string; lastModel?: string }>(
+        path.join(home, '.codex', '.codex-global-state.json')
+      );
+      if (globalState?.model) models.push(globalState.model);
+      if (globalState?.lastModel) models.push(globalState.lastModel);
 
       const catalogsDir = path.join(home, '.codex', 'model-catalogs');
       if (fs.existsSync(catalogsDir)) {
@@ -752,6 +762,93 @@ function readLocalCliHints(cliId: string): {
     baseUrl,
     source: sources.join(' + ') || undefined
   };
+}
+
+function queryCodexAppServerModels(codexBin: string): Promise<string[]> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (list: string[]) => {
+      if (settled) return;
+      settled = true;
+      try {
+        child.kill();
+      } catch {
+        // ignore
+      }
+      resolve(list);
+    };
+
+    const isWinCmd = process.platform === 'win32' && /\.(cmd|bat)$/i.test(codexBin);
+    const child = spawn(codexBin, ['app-server'], {
+      shell: isWinCmd,
+      windowsHide: true,
+      stdio: ['pipe', 'pipe', 'ignore']
+    });
+
+    const timer = setTimeout(() => finish([]), 7000);
+    let buf = '';
+
+    child.stdout?.on('data', (chunk: Buffer) => {
+      buf += chunk.toString('utf-8');
+      const lines = buf.split(/\r?\n/);
+      buf = lines.pop() || '';
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith('{')) continue;
+        try {
+          const msg = JSON.parse(trimmed) as {
+            id?: number;
+            result?: {
+              data?: Array<{ id?: string; slug?: string; hidden?: boolean; visibility?: string }>;
+              models?: Array<{ id?: string; slug?: string; hidden?: boolean; visibility?: string }>;
+            };
+          };
+          if (msg.id === 1) {
+            child.stdin?.write(
+              `${JSON.stringify({ jsonrpc: '2.0', method: 'initialized', params: {} })}\n`
+            );
+            child.stdin?.write(
+              `${JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'model/list', params: {} })}\n`
+            );
+          } else if (msg.id === 2) {
+            clearTimeout(timer);
+            const rawList = msg.result?.data || msg.result?.models || [];
+            const ids = rawList
+              .filter((m) => !m.hidden && m.visibility !== 'hide')
+              .map((m) => (m.slug || m.id || '').trim())
+              .filter(Boolean);
+            finish(ids);
+            return;
+          }
+        } catch {
+          // ignore non-JSON lines
+        }
+      }
+    });
+
+    child.on('error', () => {
+      clearTimeout(timer);
+      finish([]);
+    });
+    child.on('close', () => {
+      clearTimeout(timer);
+      finish([]);
+    });
+
+    try {
+      child.stdin?.write(
+        `${JSON.stringify({
+          jsonrpc: '2.0',
+          id: 1,
+          params: { clientInfo: { name: 'MuseDeck', version: '0.4.7' } },
+          method: 'initialize'
+        })}\n`
+      );
+    } catch {
+      clearTimeout(timer);
+      finish([]);
+    }
+  });
 }
 
 export async function scanCliModels(
@@ -841,6 +938,79 @@ export async function scanCliModels(
   if (localHints.models.length > 0) {
     localHints.models.forEach((m) => discovered.add(m));
     if (localHints.source) sources.push(`本机配置 (${localHints.source})`);
+  }
+
+  // Live query `codex app-server` JSON-RPC `model/list` for subscription/OAuth Codex!
+  if (cliId === 'codex') {
+    const codexPath = await locateCommand('codex');
+    if (codexPath) {
+      const liveCodexModels = await queryCodexAppServerModels(codexPath);
+      if (liveCodexModels.length > 0) {
+        // Put live subscription models first so newest OAuth models appear at the top!
+        const prev = Array.from(discovered);
+        discovered.clear();
+        liveCodexModels.forEach((m) => discovered.add(m));
+        prev.forEach((m) => discovered.add(m));
+        sources.unshift('codex app-server (订阅实时拉取)');
+      } else if (discovered.size === 0) {
+        const hasAuth = fs.existsSync(path.join(os.homedir(), '.codex', 'auth.json'));
+        if (!hasAuth) {
+          return {
+            models: [],
+            sources: [],
+            error: '未检测到 Codex 登录凭证，请先在终端运行 codex login 登录订阅账号后再点扫描'
+          };
+        }
+      }
+    }
+  }
+
+  // Live query `opencode models` if OpenCode CLI is installed
+  if (cliId === 'opencode') {
+    const ocPath = await locateCommand('opencode');
+    if (ocPath) {
+      try {
+        const { stdout } = await execFileAsync(ocPath, ['models'], {
+          timeout: 12000,
+          windowsHide: true,
+          shell: process.platform === 'win32' && /\.(cmd|bat)$/i.test(ocPath)
+        });
+        for (const line of stdout.split(/\r?\n/)) {
+          const t = line.trim();
+          if (t && /^[a-z0-9._/-]+$/i.test(t)) discovered.add(t);
+        }
+        if (discovered.size > 0) sources.push('opencode models (实时检测)');
+      } catch {
+        // fallback to defaults
+      }
+    }
+  }
+
+  // Subscription OAuth standard model sets for Claude Code & Gemini CLI when logged in locally
+  if (cliId === 'claude') {
+    const hasClaudeAuth =
+      fs.existsSync(path.join(os.homedir(), '.claude.json')) ||
+      fs.existsSync(path.join(os.homedir(), '.claude', '.credentials.json')) ||
+      fs.existsSync(path.join(os.homedir(), '.claude', 'settings.json'));
+    if (hasClaudeAuth) {
+      (def?.models || []).forEach((m) => discovered.add(m));
+      if (!sources.some((s) => s.includes('Claude'))) {
+        sources.push('Claude 本地订阅/配置可用模型');
+      }
+    }
+  }
+
+  if (cliId === 'gemini') {
+    const hasGeminiAuth =
+      fs.existsSync(path.join(os.homedir(), '.gemini', 'oauth_creds.json')) ||
+      fs.existsSync(path.join(os.homedir(), '.gemini', 'google_accounts.json')) ||
+      fs.existsSync(path.join(os.homedir(), '.gemini', 'settings.json'));
+    if (hasGeminiAuth) {
+      (def?.models || []).forEach((m) => discovered.add(m));
+      if (!sources.some((s) => s.includes('Gemini'))) {
+        sources.push('Gemini OAuth 登录可用模型');
+      }
+    }
   }
 
   // Live query `agy models` for Antigravity CLI

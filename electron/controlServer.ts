@@ -194,6 +194,7 @@ export class ControlServer {
   private onStateChanged: () => void;
   private server: http.Server | null = null;
   private liveModelsCache = new Map<string, { models: string[]; fetchedAt: number }>();
+  public lastFeishuPushAt = 0;
 
   constructor(
     store: FmcStore,
@@ -306,11 +307,21 @@ export class ControlServer {
 
     const parsed = new URL(req.url || '/', 'http://127.0.0.1');
     const pathname = parsed.pathname;
+    const hostHeader = String(req.headers.host || '').toLowerCase();
+    const isRemoteTunnelHit =
+      Boolean(req.headers['x-forwarded-for']) ||
+      (Boolean(hostHeader) && !hostHeader.startsWith('127.0.0.1') && !hostHeader.startsWith('localhost'));
 
     if (pathname === '/api/v1/health') {
+      if (isRemoteTunnelHit && !this.store.getState().muse.tunnelVerified) {
+        this.store.update((s) => {
+          s.muse.tunnelVerified = true;
+        });
+        this.onStateChanged();
+      }
       this.sendJson(res, 200, {
         ok: true,
-        service: 'FMC Local Control API',
+        service: 'MuseDeck Local Control API',
         feishu: this.feishu.getStatus().state
       });
       return;
@@ -354,6 +365,14 @@ export class ControlServer {
     if (authHeader !== `Bearer ${expectedToken}`) {
       this.sendJson(res, 401, { error: 'Unauthorized: invalid Bearer token' });
       return;
+    }
+
+    // Any authenticated API request from Muse proves tunnel + Bearer token + site permission are 100% working!
+    if (!this.store.getState().muse.tunnelVerified) {
+      this.store.update((s) => {
+        s.muse.tunnelVerified = true;
+      });
+      this.onStateChanged();
     }
 
     if (req.method === 'GET' && pathname === '/api/v1/clis') {
@@ -437,6 +456,7 @@ export class ControlServer {
         },
         sendToFeishu
       );
+      if (sent && sendToFeishu) this.lastFeishuPushAt = Date.now();
       this.sendJson(res, 200, { ok: true, sentToFeishu: sent, status: this.workflow.getStatus() });
       return;
     }
@@ -450,6 +470,7 @@ export class ControlServer {
       }
       const sendToFeishu = body.sendToFeishu !== false;
       const sent = await this.workflow.proposePlan(plan, sendToFeishu);
+      if (sent && sendToFeishu) this.lastFeishuPushAt = Date.now();
       this.sendJson(res, 200, { ok: true, sentToFeishu: sent, status: this.workflow.getStatus() });
       return;
     }
@@ -499,6 +520,7 @@ export class ControlServer {
       }
       const sendToFeishu = body.sendToFeishu !== false;
       const sent = await this.workflow.markAwaitingUser(summary, sendToFeishu);
+      if (sent && sendToFeishu) this.lastFeishuPushAt = Date.now();
       const images: string[] = Array.isArray(body.images)
         ? body.images.map((x) => String(x || '').trim()).filter(Boolean)
         : body.image
@@ -914,6 +936,9 @@ export class ControlServer {
         if (await this.feishu.sendFile(chatId, f, dirs)) {
           filesSent += 1;
         }
+      }
+      if (sent || imagesSent > 0 || filesSent > 0) {
+        this.lastFeishuPushAt = Date.now();
       }
       this.sendJson(res, sent || imagesSent > 0 || filesSent > 0 ? 200 : 500, {
         sent,

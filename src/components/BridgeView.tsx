@@ -284,14 +284,37 @@ export const BridgeView: React.FC<BridgeViewProps> = ({ state, feishuStatus }) =
                   </div>
 
                   {tunnelStatus.authUrl && tunnelStatus.state === 'starting' && (
-                    <div className="mt-2 rounded-xl border border-[#e4e4e7] bg-[#fafafa] p-3 text-[11.5px] text-[#3f3f46]">
-                      <div>请在浏览器完成一次性 Tailscale 授权 / 开关配置：</div>
+                    <div className="mt-2.5 rounded-xl border border-amber-200 bg-amber-50/70 p-3 text-[11.5px] text-amber-950">
+                      <div className="font-semibold">正在等待浏览器完成一次性 Tailscale 网页授权：</div>
                       <button
                         onClick={() => void window.fmc.openExternal(tunnelStatus.authUrl!)}
-                        className="mt-1 break-all font-mono text-[#111827] underline"
+                        className="mt-1 break-all text-left font-mono text-[11px] font-medium text-[#111827] underline"
                       >
                         {tunnelStatus.authUrl}
                       </button>
+                      <ol className="mt-2 list-decimal space-y-1 pl-4 text-[11px] leading-relaxed text-amber-900">
+                        <li>
+                          <strong>设备绑定页面（/a/...）</strong>：使用 Google / GitHub / Microsoft 登录免费账号，点击页面上的 <strong>Connect（连接设备）</strong> 按钮。
+                        </li>
+                        <li>
+                          <strong>开启 Funnel 公网转发（/f/funnel）</strong>：若随后再次弹出开启 Funnel 页面，点击 <strong>Enable Funnel</strong> 即可（如提示需先开 HTTPS，点击进入{' '}
+                          <button
+                            type="button"
+                            onClick={() => void window.fmc.openExternal('https://login.tailscale.com/admin/dns')}
+                            className="font-medium underline"
+                          >
+                            DNS 设置页
+                          </button>{' '}
+                          开启 MagicDNS 与 <strong>Enable HTTPS</strong>）。
+                        </li>
+                        <li>完成后无需手动复制，MuseDeck 会在几秒内自动获取并填入永久 <code>https://...ts.net</code> 域名。</li>
+                      </ol>
+                    </div>
+                  )}
+
+                  {tunnelStatus.state !== 'running' && !tunnelStatus.authUrl && (
+                    <div className="mt-2 rounded-xl border border-[#f1f1f3] bg-[#fafafa] px-3 py-2 text-[11px] leading-relaxed text-[#52525b]">
+                      首次点击「启动永久域名」会自动打开 Tailscale 网页：① 登录后点 <strong>Connect</strong> 绑定本机虚拟节点 → ② 若弹出 Funnel 确认页再点 <strong>Enable Funnel</strong> → ③ 自动生成永久 443 域名（免装客户端，以后静默秒连）。
                     </div>
                   )}
 
@@ -319,7 +342,7 @@ export const BridgeView: React.FC<BridgeViewProps> = ({ state, feishuStatus }) =
                         }
                         className="accent-[#18181b]"
                       />
-                      启动 FMC 时自动挂起内嵌 Tailscale 永久域名（退出应用自动关闭）
+                      启动 MuseDeck 时自动挂起内嵌 Tailscale 永久域名（退出应用自动关闭）
                     </label>
                   </div>
                 </div>

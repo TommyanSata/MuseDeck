@@ -489,6 +489,7 @@ ${nextInstruction}`;
   }
 
   async approvePlan(): Promise<WorkflowRunState> {
+    this.run.projectApproved = true;
     this.run.planApproved = true;
     this.run.phase = 'running';
     this.run.pauseReason = undefined;
@@ -496,6 +497,39 @@ ${nextInstruction}`;
     await this.wakeMuse(
       '【用户已批准执行方案】请立即按照已批准的职能分工、模型配置与审阅要求开始派单执行。'
     );
+    return this.getStatus();
+  }
+
+  /**
+   * Unlocks projectApproved / planApproved silently without sending a duplicate wakeup prompt,
+   * used when the user approves directly inside Muse Native Chat or clicks a Muse config-choice button!
+   */
+  markApprovedSilently(stage: 'project' | 'plan', onProjectsChanged?: () => void): WorkflowRunState {
+    if (stage === 'project' || !this.run.projectApproved) {
+      const prop = this.run.pendingProjectProposal;
+      if (prop && prop.action === 'create_new' && prop.projectName.trim()) {
+        const created = this.store.addProject({
+          name: prop.projectName.trim(),
+          description: prop.description || '',
+          repoPath: prop.repoPath || '',
+          createdBy: 'muse'
+        });
+        this.run.approvedProjectName = created.name;
+        onProjectsChanged?.();
+      }
+      this.run.projectApproved = true;
+      if (stage === 'project') {
+        const cfg = this.getConfig();
+        this.run.phase = (cfg.planApprovalMode || 'adaptive') === 'never' ? 'running' : 'awaiting_plan_approval';
+      }
+    }
+    if (stage === 'plan') {
+      this.run.projectApproved = true;
+      this.run.planApproved = true;
+      this.run.phase = 'running';
+      this.run.pauseReason = undefined;
+    }
+    this.emit();
     return this.getStatus();
   }
 

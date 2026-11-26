@@ -45,6 +45,8 @@ export interface FmcApi {
     suggestedName?: string
   ) => Promise<{ ok: boolean; savedPath?: string; message: string }>;
   syncTunnelToMuse: () => Promise<{ ok: boolean; message: string }>;
+  testMuseSitePermission: () => Promise<{ ok: boolean; message: string }>;
+  autoClickMuseAlwaysAllow: () => Promise<{ ok: boolean; message: string }>;
   fetchMuseAvatar: () => Promise<{
     ok: boolean;
     kind?: 'image' | 'video';

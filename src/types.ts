@@ -176,6 +176,7 @@ export interface FeishuConfig {
 export interface MuseConfig {
   webUrl: string;
   autoBriefSynced: boolean;
+  tunnelVerified?: boolean;
   avatarUrl?: string;
   avatarKind?: 'image' | 'video';
 }

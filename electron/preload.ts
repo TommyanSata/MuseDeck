@@ -36,6 +36,8 @@ contextBridge.exposeInMainWorld('fmc', {
   saveMediaFile: (url: string, suggestedName?: string) =>
     ipcRenderer.invoke('muse:saveMediaFile', url, suggestedName),
   syncTunnelToMuse: () => ipcRenderer.invoke('muse:syncTunnel'),
+  testMuseSitePermission: () => ipcRenderer.invoke('muse:testSitePermission'),
+  autoClickMuseAlwaysAllow: () => ipcRenderer.invoke('muse:autoClickAlwaysAllow'),
   fetchMuseAvatar: () => ipcRenderer.invoke('muse:fetchAvatar'),
   applyMuseDesktopIcon: (payload?: { pngDataUrl?: string; avatarUrl?: string }) =>
     ipcRenderer.invoke('app:applyMuseDesktopIcon', payload),

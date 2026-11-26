@@ -79,6 +79,37 @@ let museHistoryCache: MuseRichMessage[] = [];
 let museInitialHydrated = false;
 let pendingMuseActions: MuseRichAction[] = [];
 let lastPushedActionsSig = '';
+let pendingFeishuTurn: {
+  startedAt: number;
+  sawBusy: boolean;
+  baselineMuseText: string;
+} | null = null;
+let lastDirectFeishuPushAt = 0;
+
+function syncUserApprovalFromChatOrButton(rawText: string): void {
+  const t = (rawText || '').trim();
+  if (!t || !workflow) return;
+  const st = workflow.getStatus();
+  if (st.phase === 'awaiting_project_approval') {
+    if (
+      /^(?:批准|同意|通过|开始|可以|好的?|没问题|行|ok|okay|yes|go|lgtm|approve|确认|放这里|新建|用当前)/i.test(t)
+    ) {
+      workflow.markApprovedSilently('project', () => broadcast('state:changed', store.getState()));
+    }
+  } else if (st.phase === 'awaiting_plan_approval') {
+    if (
+      /^(?:批准|同意|通过|开始|开工|启动|可以|好的?|没问题|行|ok|okay|yes|go|lgtm|approve|确认|[12])$|(?:推荐配置|默认配置|推荐方案|默认方案|第一套|第二套|方案\s*[12]|选\s*[12])/i.test(
+        t
+      )
+    ) {
+      workflow.markApprovedSilently('plan', () => broadcast('state:changed', store.getState()));
+    }
+  } else if (st.phase === 'awaiting_user') {
+    if (/^(?:满意|通过|结项|完成)[！!。.~～\s]*$/i.test(t)) {
+      workflow.approveByUser();
+    }
+  }
+}
 let museLivePoller: NodeJS.Timeout | null = null;
 
 function broadcast(channel: string, payload: unknown): void {
@@ -666,7 +697,36 @@ async function pollMuseLiveState(): Promise<void> {
           }
         }
 
-        return { isBusy, statusText, hasPendingPermission, avatarUrl, avatarKind };
+        // Also extract latest Muse reply & option buttons so background Feishu auto-reply works even in tray/other tabs
+        let latestMuseReply = '';
+        const bgActions = [];
+        const allBubbles = Array.from(
+          document.querySelectorAll('[class*="message"], [class*="bubble"], [role="article"], main div')
+        ).filter((el) => {
+          if (el.closest('header, nav, aside, form, button, [role="dialog"]')) return false;
+          if (el.children.length > 16) return false;
+          const r = el.getBoundingClientRect();
+          if (r.width < 60 || r.height < 16 || r.left > window.innerWidth * 0.36) return false;
+          const txt = (el.innerText || '').trim();
+          return txt.length >= 2 && txt.length < 8000;
+        });
+        if (allBubbles.length > 0) {
+          const lastEl = allBubbles[allBubbles.length - 1];
+          latestMuseReply = (lastEl.innerText || '').trim();
+          window.__fmcActCounter = window.__fmcActCounter || 1;
+          for (const b of Array.from(lastEl.querySelectorAll('button, [role="button"]'))) {
+            const lbl = (b.innerText || '').trim().replace(/\\s+/g, ' ').slice(0, 48);
+            if (!lbl || /^(复制|点赞|点踩|回复|更多|分享|Copy|Like|Dislike)$/i.test(lbl)) continue;
+            let aid = b.getAttribute('data-fmc-action-id');
+            if (!aid) {
+              aid = 'fmc-act-' + (window.__fmcActCounter++);
+              b.setAttribute('data-fmc-action-id', aid);
+            }
+            bgActions.push({ id: aid, label: lbl });
+          }
+        }
+
+        return { isBusy, statusText, hasPendingPermission, avatarUrl, avatarKind, latestMuseReply, bgActions };
       })();
     `;
     const res = (await view.webContents.executeJavaScript(js, true)) as {
@@ -675,6 +735,8 @@ async function pollMuseLiveState(): Promise<void> {
       hasPendingPermission?: boolean;
       avatarUrl?: string;
       avatarKind?: 'image' | 'video';
+      latestMuseReply?: string;
+      bgActions?: Array<{ id: string; label: string }>;
     };
 
     const st = store.getState();
@@ -703,6 +765,63 @@ async function pollMuseLiveState(): Promise<void> {
       avatarUrl: proxiedAvatar || undefined,
       avatarKind: res?.avatarKind || undefined
     });
+
+    // Background Feishu auto-forward fallback:
+    // If a Feishu message was sent to Muse, and Muse finished replying in chat WITHOUT calling Feishu API
+    // (or popped up site-permission / config-choice buttons), push it to Feishu automatically!
+    if (res?.hasPendingPermission) {
+      const permSig = '__site_perm__';
+      if (lastPushedActionsSig !== permSig) {
+        lastPushedActionsSig = permSig;
+        const chatId = store.getState().feishu.lastChatId || '';
+        if (chatId && feishu?.getStatus().state === 'connected') {
+          void feishu.sendText(
+            chatId,
+            '🔐 【Muse 站点访问权限确认】\nMuse 正在请求访问你的本地穿透接口。请直接回复「总是允许」或「1」，电脑端将自动为你点击「总是允许此站点」！'
+          );
+        }
+      }
+    }
+
+    if (pendingFeishuTurn) {
+      if (res?.isBusy) {
+        pendingFeishuTurn.sawBusy = true;
+      }
+      const elapsed = Date.now() - pendingFeishuTurn.startedAt;
+      const latestText = (res?.latestMuseReply || '').trim();
+      const hasNewReply = Boolean(latestText && latestText !== pendingFeishuTurn.baselineMuseText);
+      const apiAlreadyPushed =
+        Math.max(controlServer?.lastFeishuPushAt || 0, lastDirectFeishuPushAt) >=
+        pendingFeishuTurn.startedAt;
+
+      if (apiAlreadyPushed || elapsed > 90000) {
+        pendingFeishuTurn = null;
+      } else if (!res?.isBusy && hasNewReply && (pendingFeishuTurn.sawBusy || elapsed > 6500)) {
+        const turnCopy = pendingFeishuTurn;
+        pendingFeishuTurn = null;
+        if (turnCopy) {
+          const chatId = store.getState().feishu.lastChatId || '';
+          if (chatId && feishu?.getStatus().state === 'connected') {
+            if (res?.bgActions && res.bgActions.length >= 2) {
+              pendingMuseActions = res.bgActions.map((a) => ({
+                id: a.id,
+                label: a.label,
+                kind: 'option'
+              }));
+              const opts = res.bgActions.map((a, i) => `${i + 1}. ${a.label}`).join('\n');
+              lastDirectFeishuPushAt = Date.now();
+              void feishu.sendText(
+                chatId,
+                `💬 【Muse 回复 · 请选择】\n${latestText.slice(0, 1200)}\n\n${opts}\n👉 直接回复数字 1~${res.bgActions.length} 或选项文字即可确认！`
+              );
+            } else {
+              lastDirectFeishuPushAt = Date.now();
+              void feishu.sendText(chatId, `💬 【Muse 回复】\n${latestText.slice(0, 1500)}`);
+            }
+          }
+        }
+      }
+    }
   } catch {
     // ignore transient page reload errors
   }
@@ -772,6 +891,7 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.handle('muse:sendChat', async (_ev, text: string) => {
+    syncUserApprovalFromChatOrButton(text);
     return sendTextToMuseChat(text);
   });
 
@@ -1265,21 +1385,23 @@ function registerIpcHandlers(): void {
       return { ok: false, message: 'Muse 视图未就绪' };
     }
     try {
-      const ok = (await view.webContents.executeJavaScript(
+      const res = (await view.webContents.executeJavaScript(
         `(() => {
           const el = document.querySelector('[data-fmc-action-id=${JSON.stringify(actionId)}]');
-          if (!el || !(el instanceof HTMLElement)) return false;
+          if (!el || !(el instanceof HTMLElement)) return { ok: false, label: '' };
+          const label = (el.innerText || el.getAttribute('aria-label') || '').trim();
           el.scrollIntoView({ block: 'center' });
           el.click();
-          return true;
+          return { ok: true, label };
         })()`,
         true
-      )) as boolean;
-      if (ok) {
+      )) as { ok: boolean; label: string };
+      if (res?.ok) {
+        syncUserApprovalFromChatOrButton(res.label);
         pendingMuseActions = [];
       }
-      return ok
-        ? { ok: true, message: '已触发对应选项' }
+      return res?.ok
+        ? { ok: true, message: `已触发「${res.label || '对应选项'}」` }
         : { ok: false, message: '该选项已过期或不存在，可切至网页视图查看' };
     } catch (err) {
       return {
@@ -1351,6 +1473,56 @@ function registerIpcHandlers(): void {
 
   ipcMain.handle('muse:syncTunnel', async () => {
     return syncLatestBriefToMuse(true);
+  });
+
+  ipcMain.handle('muse:testSitePermission', async () => {
+    const st = store.getState();
+    const tunnelUrl = (tunnel?.getStatus().url || st.controlApi.tunnelUrl || '').trim().replace(/\/+$/, '');
+    if (!tunnelUrl) {
+      return { ok: false, message: '请先在上一步启动公网 443 隧道并拿到域名' };
+    }
+    store.update((s) => {
+      s.muse.tunnelVerified = false;
+    });
+    broadcast('state:changed', store.getState());
+    // Ensure latest protocol is synced first, then ask Muse to hit /api/v1/clis immediately
+    await syncLatestBriefToMuse(true);
+    const probeMsg = `【MuseDeck 初始站点权限与连通性预检】请立即发起一次 GET ${tunnelUrl}/api/v1/clis 请求（携带 Header: Authorization: Bearer ${st.controlApi.token}），不要执行其他任务，拿到 200 后简短回复「握手成功」即可。`;
+    const sent = await sendTextToMuseChat(probeMsg);
+    return sent.ok
+      ? {
+          ok: true,
+          message: '已向 Muse 发起权限预检请求！留意左侧网页，若弹出外部站点提示请点击「总是允许此站点」'
+        }
+      : sent;
+  });
+
+  ipcMain.handle('muse:autoClickAlwaysAllow', async () => {
+    const view = ensureEmbeddedView('muse');
+    if (!view || view.webContents.isDestroyed()) {
+      return { ok: false, message: 'Muse 网页未就绪' };
+    }
+    try {
+      const res = (await view.webContents.executeJavaScript(
+        `(() => {
+          const btns = Array.from(document.querySelectorAll('button, [role="button"]'));
+          const target =
+            btns.find((b) => /总是允许此站点|Always allow/i.test((b.innerText || '').trim())) ||
+            btns.find((b) => /^允许$|^Allow$/i.test((b.innerText || '').trim()));
+          if (target && target instanceof HTMLElement) {
+            target.click();
+            return { ok: true, label: (target.innerText || '').trim() };
+          }
+          return { ok: false, label: '' };
+        })()`,
+        true
+      )) as { ok: boolean; label: string };
+      return res?.ok
+        ? { ok: true, message: `已自动点击「${res.label}」，等待握手完成...` }
+        : { ok: false, message: '当前页面未检测到权限确认弹窗（若已点过或下面已显示绿勾则无需再点）' };
+    } catch (err) {
+      return { ok: false, message: err instanceof Error ? err.message : String(err) };
+    }
   });
 
   ipcMain.handle('muse:fetchAvatar', async () => {
@@ -2052,6 +2224,34 @@ app.whenReady().then(async () => {
     () => broadcast('state:changed', store.getState()),
     async (text) => {
       const trimmed = text.trim();
+      // Stage -1: Remote approve Muse site-access permission prompt directly from Feishu!
+      if (/^(总是允许此站点|总是允许|允许访问)$/i.test(trimmed)) {
+        const view = ensureEmbeddedView('muse');
+        const clickedPerm = await view.webContents
+          .executeJavaScript(
+            `(() => {
+              const btns = Array.from(document.querySelectorAll('button, [role="button"]'));
+              const target =
+                btns.find((b) => /总是允许此站点|Always allow/i.test((b.innerText || '').trim())) ||
+                btns.find((b) => /^允许$|^Allow$/i.test((b.innerText || '').trim()));
+              if (target && target instanceof HTMLElement) {
+                target.click();
+                return true;
+              }
+              return false;
+            })()`,
+            true
+          )
+          .catch(() => false);
+        if (clickedPerm) {
+          const chatId = store.getState().feishu.lastChatId;
+          if (chatId) {
+            void feishu.sendText(chatId, '✅ 已为你点击「总是允许此站点」，后续不会再重复弹窗！');
+          }
+          return { ok: true, message: '已远程批准站点访问权限' };
+        }
+      }
+
       // Stage 0: Remote click on pending Muse interactive choice/permission buttons from Feishu!
       if (pendingMuseActions.length > 0) {
         const numMatch = trimmed.match(/^(?:选|选择|点|点击|第)?\s*(\d+)\s*$/);
@@ -2081,6 +2281,7 @@ app.whenReady().then(async () => {
             )
             .catch(() => false);
           if (clicked) {
+            syncUserApprovalFromChatOrButton(matchedAction.label);
             pendingMuseActions = [];
             const chatId = store.getState().feishu.lastChatId;
             if (chatId) {
@@ -2098,6 +2299,7 @@ app.whenReady().then(async () => {
           const nextWf = await workflow.approveProject(() => broadcast('state:changed', store.getState()));
           const chatId = store.getState().feishu.lastChatId;
           if (chatId) {
+            lastDirectFeishuPushAt = Date.now();
             void feishu.sendText(
               chatId,
               `✅ 已确认项目归属：《${nextWf.approvedProjectName || '默认总控台'}》，Muse 正在为你整理具体执行方案...`
@@ -2108,15 +2310,25 @@ app.whenReady().then(async () => {
         await workflow.reviseProjectFeedback(trimmed);
         return { ok: true, message: '已将项目归属修改意见发给 Muse 调整' };
       }
-      // Stage 2: Natural-language approval from Feishu when awaiting pre-execution plan approval
+      // Stage 2: Natural-language approval or config-choice selection from Feishu when awaiting plan approval
       if (wfStatus?.phase === 'awaiting_plan_approval') {
         if (/^(批准|同意|通过|开始|开工|启动|可以|好的?|没问题|行|ok|okay|yes|go|lgtm|approve)[！!。.~～\s]*$/i.test(trimmed)) {
           await workflow.approvePlan();
           const chatId = store.getState().feishu.lastChatId;
           if (chatId) {
+            lastDirectFeishuPushAt = Date.now();
             void feishu.sendText(chatId, '✅ 已批准执行方案，Muse 正在按计划派单开工！');
           }
           return { ok: true, message: '执行方案已批准，正在开工' };
+        }
+        if (/(推荐配置|默认配置|推荐方案|默认方案|第一套|第二套|方案\s*[12]|选\s*[12])/i.test(trimmed)) {
+          workflow.markApprovedSilently('plan', () => broadcast('state:changed', store.getState()));
+          const chatId = store.getState().feishu.lastChatId;
+          if (chatId) {
+            lastDirectFeishuPushAt = Date.now();
+            void feishu.sendText(chatId, `✅ 已批准方案并选择「${trimmed}」，Muse 正在派单开工！`);
+          }
+          return sendTextToMuseChat(`【用户已批准执行方案】我选择：${trimmed}。请立即按此配置派单执行。`);
         }
         await workflow.revisePlanFeedback(trimmed);
         return { ok: true, message: '已将方案修改意见发给 Muse 调整' };
@@ -2129,6 +2341,7 @@ app.whenReady().then(async () => {
         workflow.approveByUser();
         const chatId = store.getState().feishu.lastChatId;
         if (chatId) {
+          lastDirectFeishuPushAt = Date.now();
           void feishu.sendText(chatId, '✅ 已确认验收通过，本次工作流已结项！有新需求随时发我。');
         }
         return { ok: true, message: '工作流已验收结项' };
@@ -2138,7 +2351,13 @@ app.whenReady().then(async () => {
         return { ok: true, message: '已将修改意见发给 Muse 继续迭代' };
       }
       workflow?.startNewGoal(trimmed);
-      const prompt = `【来自手机飞书的新需求】${trimmed}\n（请先调用 GET /api/v1/projects 查看现有项目列表，然后先调用 POST /api/v1/workflow/propose-project 单独问我此次任务应归入哪个已有项目还是新建项目；等我批准项目归属后，再继续制定执行方案与派单。）`;
+      const lastMuseMsg = [...museHistoryCache].reverse().find((m) => m.role === 'muse')?.text || '';
+      pendingFeishuTurn = {
+        startedAt: Date.now(),
+        sawBusy: false,
+        baselineMuseText: lastMuseMsg
+      };
+      const prompt = `【来自手机飞书的新需求】${trimmed}\n（请先调用 GET /api/v1/projects 查看现有项目列表，然后先调用 POST /api/v1/workflow/propose-project 单独问我此次任务应归入哪个已有项目还是新建项目；等我批准项目归属后，再继续制定执行方案与派单。若只需直接文字答复我，也请同步调用 POST /api/v1/feishu/send 把回复发到飞书。）`;
       return sendTextToMuseChat(prompt);
     }
   );
