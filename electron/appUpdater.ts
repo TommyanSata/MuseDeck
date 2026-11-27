@@ -31,6 +31,14 @@ export interface WhatsNewInfo {
 }
 
 export const BUILTIN_RELEASE_HIGHLIGHTS: Record<string, { title: string; highlights: string[] }> = {
+  '0.7.1': {
+    title: '修复 Muse 接管飞书配置时卡在输入框 fill 的问题',
+    highlights: [
+      '固定页面元素持久化 ID（避免输入后出现清除按钮导致 b15 等编号发生位移指错元素），并将弹窗内控件置顶优先返回',
+      '升级 fill 动作为「Chromium 原生 insertText + React _valueTracker 双重同步」，确保飞书受控输入框立即生效并解锁提交按钮',
+      '为所有浏览器脚本注入增加 6.5 秒防卡死超时保护，并扩展 feishu-assist 组合步骤让 Muse 领航又稳又快'
+    ]
+  },
   '0.7.0': {
     title: '飞书双向看图与话题隔离 · 额度触顶无缝接力 · Muse 隐私脱敏接管飞书配置',
     highlights: [

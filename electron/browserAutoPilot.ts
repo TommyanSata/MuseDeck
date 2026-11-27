@@ -43,6 +43,7 @@ export interface BrowserElementSnapshot {
   type?: string;
   label: string;
   value?: string;
+  disabled?: boolean;
   href?: string;
 }
 
@@ -412,45 +413,106 @@ export class LocalBrowserController {
     return this.snapshot(target || (/open\.feishu\.cn/i.test(normalized) ? 'feishu' : 'default'));
   }
 
+  private async execJsSafe<T>(wc: WebContents, code: string, timeoutMs = 6500): Promise<T> {
+    let timer: NodeJS.Timeout | null = null;
+    try {
+      return (await Promise.race([
+        wc.executeJavaScript(code, true),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error('Browser script timed out')), timeoutMs);
+        })
+      ])) as T;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
   async snapshot(target?: 'default' | 'feishu'): Promise<LocalBrowserSnapshot> {
     const wc = this.resolveTargetWc(target);
     const js = `
       (() => {
+        window.__fmcBidSeq = window.__fmcBidSeq || 1;
         const textExcerpt = (document.body?.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 4000);
-        const nodes = Array.from(
-          document.querySelectorAll('a[href], button, [role="button"], input, textarea, select')
+        const modals = Array.from(
+          document.querySelectorAll('[role="dialog"], .ud__modal, .semi-modal-content, .arco-modal')
+        ).filter((m) => {
+          if (!(m instanceof HTMLElement)) return false;
+          const r = m.getBoundingClientRect();
+          const st = window.getComputedStyle(m);
+          return r.width > 120 && r.height > 80 && st.display !== 'none' && st.visibility !== 'hidden';
+        });
+        const topModal = modals.length > 0 ? modals[modals.length - 1] : null;
+
+        const selector = 'a[href], button, [role="button"], input, textarea, select';
+        const modalNodes = topModal ? Array.from(topModal.querySelectorAll(selector)) : [];
+        const bgNodes = Array.from(document.querySelectorAll(selector)).filter(
+          (n) => !topModal || !topModal.contains(n)
         );
+        const orderedNodes = [...modalNodes, ...bgNodes];
+
         const elements = [];
-        let seq = 1;
-        for (const el of nodes) {
-          if (elements.length >= 75) break;
+        for (const el of orderedNodes) {
+          if (elements.length >= 80) break;
           if (!(el instanceof HTMLElement)) continue;
-          if (el.tagName === 'A' && el.getAttribute('target') === '_blank' && (el.getAttribute('href') || '').includes('/document/')) {
+          const tag = el.tagName.toLowerCase();
+          const inpType = (el.getAttribute('type') || '').toLowerCase();
+          if (tag === 'input' && (inpType === 'file' || inpType === 'hidden')) continue;
+          if (tag === 'a' && el.getAttribute('target') === '_blank' && (el.getAttribute('href') || '').includes('/document/')) {
+            continue;
+          }
+          const cls = String(el.className || '').toLowerCase();
+          if (cls.includes('clearbtn') || cls.includes('input-clear') || el.getAttribute('aria-label') === 'clear') {
             continue;
           }
           const rect = el.getBoundingClientRect();
-          if (rect.width < 8 || rect.height < 8) continue;
+          if (rect.width < 10 || rect.height < 10) continue;
           const style = window.getComputedStyle(el);
-          if (style.display === 'none' || style.visibility === 'hidden') continue;
-          const bid = 'b' + (seq++);
-          el.setAttribute('data-fmc-bid', bid);
-          const tag = el.tagName.toLowerCase();
-          const label = (
+          if (style.display === 'none' || style.visibility === 'hidden' || style.pointerEvents === 'none') continue;
+
+          // Persistent stable ID across snapshots so dynamic icons/validation never shift IDs!
+          let bid = el.getAttribute('data-fmc-bid');
+          if (!bid) {
+            bid = 'b' + (window.__fmcBidSeq++);
+            el.setAttribute('data-fmc-bid', bid);
+          }
+
+          let fieldHint = '';
+          if (tag === 'input' || tag === 'textarea') {
+            const fieldRow = el.closest('[class*="form-item"], [class*="field"], [class*="item"], tr');
+            const lblNode = fieldRow ? fieldRow.querySelector('label, [class*="label"]') : null;
+            if (lblNode && lblNode instanceof HTMLElement) {
+              fieldHint = (lblNode.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 32);
+            }
+          }
+          const rawLabel = (
             el.innerText ||
-            el.getAttribute('aria-label') ||
             el.getAttribute('placeholder') ||
+            el.getAttribute('aria-label') ||
             el.getAttribute('title') ||
             el.getAttribute('name') ||
             ''
-          ).replace(/\\s+/g, ' ').trim().slice(0, 80);
+          ).replace(/\\s+/g, ' ').trim().slice(0, 64);
+
+          const inModal = Boolean(topModal && topModal.contains(el));
+          const combinedLabel = [
+            inModal ? '[弹窗]' : '',
+            fieldHint && fieldHint !== rawLabel ? fieldHint : '',
+            rawLabel
+          ].filter(Boolean).join(' ').slice(0, 90);
+
+          // Skip unlabeled tiny icon wrappers
+          if (!combinedLabel && tag !== 'input' && tag !== 'textarea') continue;
+
+          const isDisabled = el.hasAttribute('disabled') || el.getAttribute('aria-disabled') === 'true';
           elements.push({
             id: bid,
             tag,
-            type: el.getAttribute('type') || undefined,
-            label,
-            value: (el.getAttribute('type') === 'password')
+            type: inpType || undefined,
+            label: combinedLabel,
+            value: inpType === 'password'
               ? '[MASKED]'
               : (('value' in el && typeof el.value === 'string') ? el.value.slice(0, 80) : undefined),
+            disabled: isDisabled || undefined,
             href: ('href' in el && typeof el.href === 'string') ? el.href.slice(0, 160) : undefined
           });
         }
@@ -462,7 +524,7 @@ export class LocalBrowserController {
         };
       })()
     `;
-    const rawSnap = (await wc.executeJavaScript(js, true)) as LocalBrowserSnapshot;
+    const rawSnap = await this.execJsSafe<LocalBrowserSnapshot>(wc, js, 6000);
     return redactSnapshotPrivacy(rawSnap);
   }
 
@@ -482,6 +544,110 @@ export class LocalBrowserController {
       this.onFeishuProgress?.(msg);
       await setFeishuHud(wc, msg, 'running');
     }
+
+    if (req.action === 'fill') {
+      const val = String(req.text ?? '');
+      // Step 1: Locate & unwrap input/textarea, highlight briefly, and focus without scrolling modal
+      const prep = await this.execJsSafe<{
+        ok: boolean;
+        detail: string;
+        resolvedBid?: string;
+      }>(
+        wc,
+        `(async () => {
+          const tid = ${JSON.stringify(req.targetId || '')};
+          let target = tid ? document.querySelector('[data-fmc-bid=' + JSON.stringify(tid) + ']') : null;
+          if (!target && tid) {
+            const kw = tid.toLowerCase();
+            target = Array.from(document.querySelectorAll('input:not([type="file"]):not([type="hidden"]), textarea'))
+              .find((el) => ((el.getAttribute('placeholder') || el.getAttribute('aria-label') || '').toLowerCase()).includes(kw)) || null;
+          }
+          if (target && target instanceof HTMLElement && target.tagName !== 'INPUT' && target.tagName !== 'TEXTAREA' && !target.isContentEditable) {
+            const inner =
+              target.querySelector('input:not([type="file"]):not([type="hidden"]), textarea, [contenteditable="true"]') ||
+              (target.closest('[class*="input"], [class*="textarea"], [class*="form-item"]') &&
+                target.closest('[class*="input"], [class*="textarea"], [class*="form-item"]').querySelector('input:not([type="file"]):not([type="hidden"]), textarea'));
+            if (inner instanceof HTMLElement) target = inner;
+          }
+          if (!target || !(target instanceof HTMLElement)) {
+            return { ok: false, detail: 'Input target not found: ' + tid };
+          }
+          if (target.tagName !== 'INPUT' && target.tagName !== 'TEXTAREA' && !target.isContentEditable) {
+            return { ok: false, detail: 'Element ' + tid + ' is <' + target.tagName.toLowerCase() + '>, not an input or textarea. Choose an element with tag="input" or "textarea".' };
+          }
+          if (target.tagName === 'INPUT' && (target.getAttribute('type') || '').toLowerCase() === 'file') {
+            return { ok: false, detail: 'Skipping file input ' + tid };
+          }
+          const inModal = Boolean(target.closest('[role="dialog"], .ud__modal, .semi-modal-content, .arco-modal'));
+          const r = target.getBoundingClientRect();
+          if (!inModal && (r.top < 32 || r.bottom > window.innerHeight - 32)) {
+            target.scrollIntoView({ behavior: 'instant', block: 'nearest' });
+          }
+          window.__fmcBidSeq = window.__fmcBidSeq || 1;
+          let rbid = target.getAttribute('data-fmc-bid');
+          if (!rbid) {
+            rbid = 'b' + (window.__fmcBidSeq++);
+            target.setAttribute('data-fmc-bid', rbid);
+          }
+          const prevOutline = target.style.outline;
+          target.style.outline = '2.5px solid #10b981';
+          target.focus({ preventScroll: true });
+          await new Promise((res) => setTimeout(res, 180));
+          target.style.outline = prevOutline;
+          return { ok: true, detail: 'focused', resolvedBid: rbid };
+        })()`,
+        5000
+      );
+
+      if (!prep.ok) {
+        const snap = await this.snapshot(isFeishu ? 'feishu' : req.target);
+        return { ok: false, detail: prep.detail, snapshot: snap };
+      }
+
+      // Step 2: Native Chromium C++ input pipeline (SelectAll + Backspace + insertText)
+      await typeNativeIntoFocusedElement(wc, val, false);
+
+      // Step 3: Verify & enforce React 18 _valueTracker + synthetic InputEvent sync so controlled inputs ALWAYS update!
+      const verifiedVal = await this.execJsSafe<string>(
+        wc,
+        `(() => {
+          const el = document.querySelector('[data-fmc-bid=' + JSON.stringify(${JSON.stringify(prep.resolvedBid || req.targetId || '')}) + ']');
+          if (!el || !(el instanceof HTMLElement)) return '';
+          const desired = ${JSON.stringify(val)};
+          if (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA') {
+            const cur = el.value || '';
+            if (cur !== desired) {
+              const proto = el.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+              const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+              if (setter) setter.call(el, desired);
+              else el.value = desired;
+              const tracker = el._valueTracker;
+              if (tracker && typeof tracker.setValue === 'function') {
+                tracker.setValue(cur);
+              }
+            }
+            el.dispatchEvent(new InputEvent('input', { bubbles: true, data: desired, inputType: 'insertText' }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            return el.value || '';
+          }
+          if ((el.textContent || '') !== desired) {
+            el.textContent = desired;
+            el.dispatchEvent(new InputEvent('input', { bubbles: true, data: desired, inputType: 'insertText' }));
+          }
+          return el.textContent || '';
+        })()`,
+        4000
+      );
+
+      await sleep(350);
+      const snap = await this.snapshot(isFeishu ? 'feishu' : req.target);
+      return {
+        ok: true,
+        detail: `filled ${req.targetId || prep.resolvedBid} => value=${JSON.stringify(verifiedVal.slice(0, 60))}`,
+        snapshot: snap
+      };
+    }
+
     const js = `
       (async () => {
         const req = ${JSON.stringify(req)};
@@ -504,7 +670,7 @@ export class LocalBrowserController {
           : null;
         if (!target && req.targetId) {
           const kw = String(req.targetId).toLowerCase();
-          target = Array.from(document.querySelectorAll('button, a, [role="button"], input, textarea'))
+          target = Array.from(document.querySelectorAll('button, a, [role="button"], input:not([type="file"]), textarea'))
             .filter((el) => {
               const a = el.closest('a');
               if (a && ((a.getAttribute('href') || '').includes('/document/') || a.getAttribute('target') === '_blank')) return false;
@@ -517,6 +683,9 @@ export class LocalBrowserController {
         if (!target || !(target instanceof HTMLElement)) {
           return { ok: false, detail: 'Target element not found: ' + (req.targetId || '') };
         }
+        if (target.tagName === 'INPUT' && (target.getAttribute('type') || '').toLowerCase() === 'file') {
+          return { ok: false, detail: 'Refused clicking file chooser input' };
+        }
         const inModal = Boolean(target.closest('[role="dialog"], .ud__modal, .semi-modal-content, .arco-modal'));
         const r = target.getBoundingClientRect();
         if (!inModal && (r.top < 32 || r.bottom > window.innerHeight - 32)) {
@@ -524,7 +693,7 @@ export class LocalBrowserController {
         }
         const prevOutline = target.style.outline;
         target.style.outline = '2.5px solid #10b981';
-        await new Promise((res) => setTimeout(res, 360));
+        await new Promise((res) => setTimeout(res, 220));
         target.style.outline = prevOutline;
 
         if (req.action === 'click') {
@@ -534,38 +703,30 @@ export class LocalBrowserController {
           target.click();
           return { ok: true, detail: 'clicked ' + (target.innerText || req.targetId || '').trim().slice(0, 40) };
         }
-        if (req.action === 'fill') {
-          const val = String(req.text || '');
-          target.focus({ preventScroll: true });
-          if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') {
-            const proto = target.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
-            const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-            if (setter) setter.call(target, val);
-            else target.value = val;
-            target.dispatchEvent(new Event('input', { bubbles: true }));
-            target.dispatchEvent(new Event('change', { bubbles: true }));
-          } else {
-            target.textContent = val;
-            target.dispatchEvent(new InputEvent('input', { bubbles: true, data: val }));
-          }
-          return { ok: true, detail: 'filled ' + (req.targetId || '') };
-        }
         return { ok: false, detail: 'Unsupported action' };
       })()
     `;
-    const res = (await wc.executeJavaScript(js, true)) as { ok: boolean; detail: string };
-    await new Promise((r) => setTimeout(r, 750));
+    const res = await this.execJsSafe<{ ok: boolean; detail: string }>(wc, js, 6000);
+    await new Promise((r) => setTimeout(r, 600));
     const snap = await this.snapshot(isFeishu ? 'feishu' : req.target);
     return { ok: Boolean(res?.ok), detail: res?.detail || '', snapshot: snap };
   }
 
   /**
    * Privacy-Shielded Local Feishu Helper for Muse Co-Pilot:
-   * Handles Monaco JSON injection and 100% local credential extraction + WebSocket connection
+   * Supports high-level step helpers + Monaco JSON injection + 100% local credential binding
    * so Muse NEVER reads, sees, or touches App Secret or any private key!
    */
   async feishuAssist(
-    op: 'status' | 'fill_permission_json' | 'sync_local_bridge'
+    op:
+      | 'status'
+      | 'create_or_enter_app'
+      | 'add_bot_capability'
+      | 'fill_permission_json'
+      | 'sync_local_bridge'
+      | 'configure_events'
+      | 'prepare_version',
+    params?: { botName?: string; botDesc?: string }
   ): Promise<Record<string, unknown>> {
     const wc = this.resolveTargetWc('feishu');
     const curUrl = wc.getURL();
@@ -574,8 +735,11 @@ export class LocalBrowserController {
       await waitPageSettled(wc, 1400);
     }
 
+    const readCurrentAppId = () => wc.getURL().match(/\/app\/(cli_[a-zA-Z0-9]+)/)?.[1] || '';
+
     if (op === 'status') {
-      const stateInfo = (await wc.executeJavaScript(
+      const stateInfo = await this.execJsSafe<Record<string, unknown>>(
+        wc,
         `(() => {
           const href = location.href;
           const txt = document.body?.innerText || '';
@@ -590,17 +754,162 @@ export class LocalBrowserController {
             hasReceiveEventOnPage: txt.includes('im.message.receive_v1')
           };
         })()`,
-        true
-      )) as Record<string, unknown>;
+        5000
+      );
       const snap = await this.snapshot('feishu');
       return { ok: true, ...stateInfo, snapshot: snap };
     }
 
-    if (op === 'fill_permission_json') {
-      this.onFeishuProgress?.('🔒 本地助手正在向权限编辑器写入 7 项飞书权限 JSON...');
-      await setFeishuHud(wc, '🔒 本地助手正在写入 7 项飞书权限 JSON...', 'running');
+    if (op === 'create_or_enter_app') {
+      let appId = readCurrentAppId();
+      if (!appId) {
+        const botName = (params?.botName || 'MuseDeck').trim() || 'MuseDeck';
+        const botDesc = (params?.botDesc || 'MuseDeck 本地多智能体调度助手').trim();
+        this.onFeishuProgress?.(`🤖 Muse 正在创建企业自建应用「${botName}」...`);
+        await setFeishuHud(wc, `🤖 Muse 正在创建企业自建应用「${botName}」...`, 'running');
 
-      await wc.executeJavaScript(
+        // Open create modal if not already open
+        const hasModalOpen = await this.execJsSafe<boolean>(
+          wc,
+          `(() => Boolean(document.querySelector('[role="dialog"] input, .ud__modal input, .semi-modal-content input, .arco-modal input')))()`,
+          4000
+        );
+        if (!hasModalOpen) {
+          await findAndHighlightClick(wc, '创建企业自建应用', { buttonsOnly: true, pauseAfterMs: 1000 });
+        }
+
+        // Fill Name & Description natively + sync React _valueTracker
+        for (let idx = 0; idx < 2; idx++) {
+          const textVal = idx === 0 ? botName : botDesc;
+          const focused = await this.execJsSafe<boolean>(
+            wc,
+            `(() => {
+              const modal = document.querySelector('[role="dialog"], .ud__modal, .semi-modal-content, .arco-modal') || document.body;
+              const fields = Array.from(modal.querySelectorAll('input:not([type="file"]):not([type="hidden"]), textarea'))
+                .filter((el) => el.getBoundingClientRect().width > 80 && el.getBoundingClientRect().height > 20);
+              const el = fields[${idx}];
+              if (!el || !(el instanceof HTMLElement)) return false;
+              el.focus({ preventScroll: true });
+              return true;
+            })()`,
+            4000
+          );
+          if (focused) {
+            await typeNativeIntoFocusedElement(wc, textVal, false);
+            await this.execJsSafe(
+              wc,
+              `(() => {
+                const modal = document.querySelector('[role="dialog"], .ud__modal, .semi-modal-content, .arco-modal') || document.body;
+                const fields = Array.from(modal.querySelectorAll('input:not([type="file"]):not([type="hidden"]), textarea'))
+                  .filter((el) => el.getBoundingClientRect().width > 80 && el.getBoundingClientRect().height > 20);
+                const el = fields[${idx}];
+                if (!el) return;
+                const desired = ${JSON.stringify(textVal)};
+                if ((el.value || '') !== desired) {
+                  const proto = el.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+                  const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+                  if (setter) setter.call(el, desired);
+                  if (el._valueTracker) el._valueTracker.setValue('');
+                  el.dispatchEvent(new InputEvent('input', { bubbles: true, data: desired, inputType: 'insertText' }));
+                  el.dispatchEvent(new Event('change', { bubbles: true }));
+                }
+              })()`,
+              4000
+            );
+          }
+        }
+        await sleep(350);
+        await findAndHighlightClick(wc, '^(创建|确定|确认)$', {
+          insideModal: true,
+          buttonsOnly: true,
+          pauseAfterMs: 1200
+        });
+        for (let i = 0; i < 16; i++) {
+          appId = readCurrentAppId();
+          if (appId) break;
+          await sleep(450);
+        }
+      }
+      const snap = await this.snapshot('feishu');
+      return {
+        ok: Boolean(appId),
+        insideAppConsole: Boolean(appId),
+        note: appId
+          ? 'Entered app console successfully. Proceed to add_bot_capability.'
+          : 'Create modal is open; inspect snapshot.elements if an extra confirmation or org selection is needed.',
+        snapshot: snap
+      };
+    }
+
+    if (op === 'add_bot_capability') {
+      const appId = readCurrentAppId();
+      this.onFeishuProgress?.('🤖 Muse 正在开启应用「机器人」能力...');
+      await setFeishuHud(wc, '🤖 Muse 正在开启应用「机器人」能力...', 'running');
+      let hasBot = await this.execJsSafe<boolean>(
+        wc,
+        `(() => Array.from(document.querySelectorAll('aside *, nav *, [class*="menu"] *')).some((el) => el instanceof HTMLElement && (el.innerText || '').trim() === '机器人'))()`,
+        4000
+      );
+      if (!hasBot && appId) {
+        await navigateFeishuSection(wc, ['添加应用能力'], ['按能力添加', '机器人'], `https://open.feishu.cn/app/${appId}`);
+        await sleep(600);
+        await this.execJsSafe(
+          wc,
+          `(async () => {
+            const cards = Array.from(document.querySelectorAll('div, section, li')).filter((el) => {
+              if (!(el instanceof HTMLElement)) return false;
+              const t = (el.innerText || '').trim();
+              const r = el.getBoundingClientRect();
+              return t.includes('机器人') && !(t.includes('网页应用') && t.includes('小程序')) && r.width >= 180 && r.width <= 720 && r.height >= 70 && r.height <= 400;
+            }).sort((a, b) => a.innerText.length - b.innerText.length);
+            for (const card of cards) {
+              if ((card.innerText || '').includes('已添加')) return true;
+              const btn = Array.from(card.querySelectorAll('button')).find((b) => {
+                const bt = (b.innerText || '').replace(/\\s+/g, '').trim();
+                return !/了解|文档|详情/.test(bt) && /^(\\+?添加|添加机器人|启用)$/.test(bt) && !b.hasAttribute('disabled');
+              });
+              if (btn instanceof HTMLElement) {
+                btn.click();
+                return true;
+              }
+            }
+            return false;
+          })()`,
+          5000
+        );
+        await sleep(900);
+        await findAndHighlightClick(wc, '^(添加|确定|确认|保存)$', { insideModal: true, buttonsOnly: true, pauseAfterMs: 900 });
+        hasBot = await this.execJsSafe<boolean>(
+          wc,
+          `(() => Array.from(document.querySelectorAll('aside *, nav *, [class*="menu"] *')).some((el) => el instanceof HTMLElement && (el.innerText || '').trim() === '机器人') || (document.body?.innerText || '').includes('已添加'))()`,
+          4000
+        );
+      }
+      const snap = await this.snapshot('feishu');
+      return { ok: hasBot, hasBotCapabilityInMenu: hasBot, snapshot: snap };
+    }
+
+    if (op === 'fill_permission_json') {
+      const appId = readCurrentAppId();
+      this.onFeishuProgress?.('🔒 本地助手正在导入并开通 7 项飞书消息与表情权限...');
+      await setFeishuHud(wc, '🔒 本地助手正在导入 7 项飞书权限 JSON...', 'running');
+
+      if (appId && !wc.getURL().includes('/auth')) {
+        await navigateFeishuSection(wc, ['权限管理'], ['批量导入', '开通权限'], `https://open.feishu.cn/app/${appId}/auth`);
+        await sleep(700);
+      }
+      const modalAlreadyOpen = await this.execJsSafe<boolean>(
+        wc,
+        `(() => Boolean(document.querySelector('[role="dialog"] .monaco-editor, .ud__modal .monaco-editor, .semi-modal-content .monaco-editor, .arco-modal .monaco-editor')))()`,
+        4000
+      );
+      if (!modalAlreadyOpen) {
+        await findAndHighlightClick(wc, '批量导入', { buttonsOnly: true, pauseAfterMs: 1000 });
+        await findAndHighlightClick(wc, '^导入权限$', { insideModal: true, pauseAfterMs: 500 });
+      }
+
+      await this.execJsSafe(
+        wc,
         `(() => {
           const jsonStr = ${JSON.stringify(FEISHU_REQUIRED_SCOPES_JSON)};
           const modal = document.querySelector('[role="dialog"], .ud__modal, .semi-modal-content, .arco-modal') || document;
@@ -614,33 +923,31 @@ export class LocalBrowserController {
             let cur = fiberKey ? node[fiberKey] : null;
             for (let depth = 0; cur && depth < 15; depth++, cur = cur.return) {
               const inst = cur.stateNode;
-              if (inst && inst.editor && typeof inst.editor.setValue === 'function') {
-                inst.editor.setValue(jsonStr);
-              }
-              if (cur.ref && cur.ref.current && cur.ref.current.editor && typeof cur.ref.current.editor.setValue === 'function') {
-                cur.ref.current.editor.setValue(jsonStr);
-              }
+              if (inst && inst.editor && typeof inst.editor.setValue === 'function') inst.editor.setValue(jsonStr);
+              if (cur.ref && cur.ref.current && cur.ref.current.editor && typeof cur.ref.current.editor.setValue === 'function') cur.ref.current.editor.setValue(jsonStr);
             }
           }
         })()`,
-        true
+        5000
       );
-      await sleep(350);
+      await sleep(300);
 
-      let hasScopes = (await wc.executeJavaScript(
+      let hasScopes = await this.execJsSafe<boolean>(
+        wc,
         `(() => {
           const modal = document.querySelector('[role="dialog"], .ud__modal, .semi-modal-content, .arco-modal');
           const txt = ((modal && modal.innerText) || '').replace(/\\u00a0/g, ' ');
           return txt.includes('im:message:send_as_bot') && txt.includes('im:resource');
         })()`,
-        true
-      )) as boolean;
+        4000
+      );
 
       if (!hasScopes) {
         const prevClip = clipboard.readText();
         try {
           clipboard.writeText(FEISHU_REQUIRED_SCOPES_JSON);
-          const rect = (await wc.executeJavaScript(
+          const rect = await this.execJsSafe<{ x: number; y: number; width: number; height: number } | null>(
+            wc,
             `(() => {
               const modal = document.querySelector('[role="dialog"], .ud__modal, .semi-modal-content, .arco-modal');
               if (!modal) return null;
@@ -651,30 +958,52 @@ export class LocalBrowserController {
               const r = ed.getBoundingClientRect();
               return { x: r.left, y: r.top, width: r.width, height: r.height };
             })()`,
-            true
-          )) as { x: number; y: number; width: number; height: number } | null;
-
+            4000
+          );
           if (rect && rect.width > 40) {
-            await clickHardwareAt(
-              wc,
-              rect.x + Math.min(120, rect.width / 2),
-              rect.y + Math.min(60, rect.height / 2)
-            );
+            await clickHardwareAt(wc, rect.x + Math.min(120, rect.width / 2), rect.y + Math.min(60, rect.height / 2));
           }
-          await sleep(200);
+          await sleep(180);
           await sendSelectAllAndBackspace(wc);
           wc.paste();
-          await sleep(650);
-          hasScopes = (await wc.executeJavaScript(
+          await sleep(550);
+          hasScopes = await this.execJsSafe<boolean>(
+            wc,
             `(() => {
               const modal = document.querySelector('[role="dialog"], .ud__modal, .semi-modal-content, .arco-modal');
               const txt = ((modal && modal.innerText) || '').replace(/\\u00a0/g, ' ');
               return txt.includes('im:message') && txt.includes('im:resource');
             })()`,
-            true
-          )) as boolean;
+            4000
+          );
         } finally {
           clipboard.writeText(prevClip);
+        }
+      }
+
+      let applied = false;
+      if (hasScopes) {
+        const nextClick = await findAndHighlightClick(wc, '下一步|确认新增权限|确定导入', {
+          insideModal: true,
+          buttonsOnly: true,
+          pauseAfterMs: 1100
+        });
+        const allGranted = await this.execJsSafe<boolean>(
+          wc,
+          `(() => /暂无新增权限|没有新增权限|已全部开通/.test(document.body?.innerText || ''))()`,
+          4000
+        );
+        if (allGranted) {
+          applied = true;
+          await findAndHighlightClick(wc, '^(取消|关闭|知道了)$', { insideModal: true, buttonsOnly: true, pauseAfterMs: 400 });
+        } else if (nextClick.clicked) {
+          const sub = await findAndHighlightClick(wc, '申请开通|确认开通|批量开通|提交申请', {
+            insideModal: true,
+            buttonsOnly: true,
+            pauseAfterMs: 1200
+          });
+          applied = sub.clicked;
+          await findAndHighlightClick(wc, '^(确定|完成|关闭|知道了)$', { insideModal: true, buttonsOnly: true, pauseAfterMs: 500 });
         }
       }
 
@@ -682,9 +1011,116 @@ export class LocalBrowserController {
       return {
         ok: hasScopes,
         scopesInjected: hasScopes,
-        note: hasScopes
-          ? 'Required 7 Feishu permission scopes injected into modal editor. Click Next / 确认新增权限 -> 申请开通 in snapshot.elements.'
-          : 'Permission modal editor not detected yet; ensure 批量导入/导出权限 modal is open first.',
+        scopesSubmitted: applied,
+        note: applied
+          ? 'All 7 Feishu permissions injected and submitted! Proceed to sync_local_bridge.'
+          : 'Scopes injected into modal; check snapshot.elements if any confirmation button remains in modal.',
+        snapshot: snap
+      };
+    }
+
+    if (op === 'configure_events') {
+      const appId = readCurrentAppId();
+      this.onFeishuProgress?.('🤖 Muse 正在配置「长连接接收事件」与 im.message.receive_v1...');
+      await setFeishuHud(wc, '🤖 Muse 正在配置长连接模式与接收消息事件...', 'running');
+      if (appId) {
+        await navigateFeishuSection(wc, ['事件与回调'], ['事件配置', '订阅方式', '添加事件'], `https://open.feishu.cn/app/${appId}/event`);
+        await sleep(800);
+      }
+      const hasRadio = await this.execJsSafe<boolean>(
+        wc,
+        `(() => Array.from(document.querySelectorAll('input[type="radio"], .ud__radio, .semi-radio')).some((el) => el.getBoundingClientRect().width > 0))()`,
+        4000
+      );
+      if (!hasRadio) {
+        await findAndHighlightClick(wc, '^(编辑|修改|修改订阅方式)$', { pauseAfterMs: 600 });
+      }
+      await findAndHighlightClick(wc, '使用长连接接收事件', { pauseAfterMs: 600 });
+      await findAndHighlightClick(wc, '^保存$', { buttonsOnly: true, pauseAfterMs: 1400 });
+
+      let eventAdded = await this.execJsSafe<boolean>(
+        wc,
+        `(() => (document.body?.innerText || '').includes('im.message.receive_v1'))()`,
+        4000
+      );
+      if (!eventAdded) {
+        const addEv = await findAndHighlightClick(wc, '添加事件', { buttonsOnly: true, pauseAfterMs: 950 });
+        if (addEv.clicked) {
+          const focused = await this.execJsSafe<boolean>(
+            wc,
+            `(() => {
+              const modal = document.querySelector('[role="dialog"], .ud__modal, .semi-modal-content, .arco-modal') || document;
+              const inp = Array.from(modal.querySelectorAll('input')).find((i) => i.type !== 'checkbox' && i.type !== 'radio' && i.getBoundingClientRect().width > 80);
+              if (inp instanceof HTMLElement) { inp.focus({ preventScroll: true }); return true; }
+              return false;
+            })()`,
+            4000
+          );
+          if (focused) {
+            await typeNativeIntoFocusedElement(wc, 'im.message.receive_v1', true);
+            await sleep(900);
+          }
+          await this.execJsSafe(
+            wc,
+            `(() => {
+              const modal = document.querySelector('[role="dialog"], .ud__modal, .semi-modal-content, .arco-modal');
+              if (!modal) return;
+              const rows = Array.from(modal.querySelectorAll('label, tr, li, div')).filter((el) => el instanceof HTMLElement && ((el.innerText || '').includes('接收消息') || (el.innerText || '').includes('im.message.receive_v1')) && el.getBoundingClientRect().height < 95).sort((a, b) => a.innerText.length - b.innerText.length);
+              const t = (rows[0] && rows[0].querySelector('input[type="checkbox"], .ud__checkbox, .semi-checkbox, .arco-checkbox')) || rows[0];
+              if (t instanceof HTMLElement) t.click();
+            })()`,
+            4000
+          );
+          await sleep(450);
+          await findAndHighlightClick(wc, '确认添加|确定', { insideModal: true, buttonsOnly: true, pauseAfterMs: 1100 });
+          eventAdded = await this.execJsSafe<boolean>(
+            wc,
+            `(() => /im\\.message\\.receive_v1|接收消息\\s*v2\\.0/.test(document.body?.innerText || ''))()`,
+            4000
+          );
+        }
+      }
+      const snap = await this.snapshot('feishu');
+      return { ok: eventAdded, eventSubscribed: eventAdded, snapshot: snap };
+    }
+
+    if (op === 'prepare_version') {
+      const appId = readCurrentAppId();
+      this.onFeishuProgress?.('🤖 Muse 正在准备 1.0.0 版本草稿，等待你点击最终发布...');
+      await setFeishuHud(wc, '✅ 配置即将完成！请在当前页点击「保存 → 申请线上发布」', 'ok');
+      if (appId) {
+        await navigateFeishuSection(wc, ['版本管理与发布'], ['创建版本', '版本管理与发布'], `https://open.feishu.cn/app/${appId}/version`);
+        await sleep(800);
+      }
+      const clickedVer = await findAndHighlightClick(wc, '创建版本', { buttonsOnly: true, pauseAfterMs: 1100 });
+      if (clickedVer.clicked) {
+        const fVer = await this.execJsSafe<boolean>(
+          wc,
+          `(() => {
+            const inp = Array.from(document.querySelectorAll('input[type="text"], input:not([type])')).find((el) => el.getBoundingClientRect().width > 80 && !el.value);
+            if (inp instanceof HTMLElement) { inp.focus({ preventScroll: true }); return true; }
+            return false;
+          })()`,
+          4000
+        );
+        if (fVer) await typeNativeIntoFocusedElement(wc, '1.0.0', false);
+
+        const fNote = await this.execJsSafe<boolean>(
+          wc,
+          `(() => {
+            const ta = Array.from(document.querySelectorAll('textarea')).find((el) => el.getBoundingClientRect().width > 120 && !el.value);
+            if (ta instanceof HTMLElement) { ta.focus({ preventScroll: true }); return true; }
+            return false;
+          })()`,
+          4000
+        );
+        if (fNote) await typeNativeIntoFocusedElement(wc, 'MuseDeck 自动配置发布', false);
+      }
+      const snap = await this.snapshot('feishu');
+      return {
+        ok: true,
+        readyForUserPublish: true,
+        note: 'Version 1.0.0 form prepared. Stop here and ask the user to click 保存 -> 申请线上发布 on the Feishu window!',
         snapshot: snap
       };
     }

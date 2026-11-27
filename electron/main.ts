@@ -2528,17 +2528,16 @@ function registerIpcHandlers(): void {
       const botDesc = (params?.botDesc || 'MuseDeck 本地多智能体调度助手').trim();
 
       const coPilotPrompt = `【飞书后台可视化导航代配任务（本地隐私护盾已开启）】
-用户已在 MuseDeck 本地受控飞书窗口（target: "feishu"）完成扫码登录。请你通过本地浏览器接口帮用户完成飞书机器人后台的界面功能配置。
-🔒 隐私安全说明：所有应用密钥与敏感字段已由 MuseDeck 本地隐私护盾自动脱敏为 [REDACTED]，且本地长连接绑定由内核自己在后台完成，**你全程不需要、也严禁尝试读取任何密钥、密码或敏感凭证**，只做公开的界面按钮点击与表单填写：
+用户已在 MuseDeck 本地受控飞书窗口（target: "feishu"）完成扫码登录。请你通过本地接口完成飞书机器人后台的配置并校验每一步返回的快照。
+🔒 隐私安全说明：所有应用密钥与敏感字段已由 MuseDeck 本地隐私护盾脱敏为 [REDACTED]，且本地长连接绑定由内核自己在后台完成，**你全程不需要、也严禁读取任何密钥、密码或敏感凭证**！
 
-请使用 \`Authorization: Bearer ${st.controlApi.token}\` 依次执行以下步骤：
-1. 调用 \`POST ${baseUrl}/api/v1/browser/feishu-assist\` Body \`{"op": "status"}\` 查看当前飞书后台页面快照（elements 中的按钮 id 如 b1, b2）；
-2. 若 \`insideAppConsole\` 为 \`false\`：调用 \`POST ${baseUrl}/api/v1/browser/act\`（带 \`"target": "feishu"\`）点击「创建企业自建应用」，填入应用名称「${botName}」与应用描述「${botDesc}」并点击弹窗内的「创建」按钮，等待进入应用详情页；
-3. 检查左侧菜单若还没有「机器人」（\`hasBotCapabilityInMenu\` 为 \`false\`）：点击左侧「添加应用能力」，找到「机器人」卡片对应的「添加」按钮点击（只点添加按钮，不要点文档链接；若有确认弹窗则点确认）；
-4. 点击左侧菜单「权限管理」，点击页面上的「批量导入/导出权限」打开弹窗，然后直接调用 \`POST ${baseUrl}/api/v1/browser/feishu-assist\` Body \`{"op": "fill_permission_json"}\` 让本地助手写入所需权限模板，随后根据返回快照点击弹窗里的「下一步 / 确认新增权限」→「申请开通」（若提示已全部开通则关闭弹窗）；
-5. 调用一次 \`POST ${baseUrl}/api/v1/browser/feishu-assist\` Body \`{"op": "sync_local_bridge"}\` —— 这会让 MuseDeck 本地内核自己在后台建立好飞书长连接（不会向你返回任何密钥）；
-6. 点击左侧菜单「事件与回调」，将事件订阅方式切换为「使用长连接接收事件」并点击「保存」，随后点击「添加事件」，搜索 \`im.message.receive_v1\`（接收消息 v2.0）勾选并点击确认添加；
-7. 点击左侧菜单「版本管理与发布」，点击「创建版本」，填入应用版本号 \`1.0.0\` 与更新说明 \`MuseDeck 自动配置\`，完成后停留在当前页并在对话里简短通知用户点击页面底部的「保存 → 申请线上发布」即可！`;
+请携带 \`Authorization: Bearer ${st.controlApi.token}\` 优先按顺序调用以下组合动作（每一步都会返回脱敏后的实时页面 \`snapshot\`；若某一步因企业特殊弹窗返回 \`ok: false\`，你再对照 \`snapshot.elements\` 调用 \`POST ${baseUrl}/api/v1/browser/act\` 点击/填写对应按钮处理即可）：
+1. \`POST ${baseUrl}/api/v1/browser/feishu-assist\` Body \`{"op": "create_or_enter_app", "botName": ${JSON.stringify(botName)}, "botDesc": ${JSON.stringify(botDesc)}}\` —— 自动创建或进入自建应用后台；
+2. \`POST ${baseUrl}/api/v1/browser/feishu-assist\` Body \`{"op": "add_bot_capability"}\` —— 为该应用开启「机器人」能力；
+3. \`POST ${baseUrl}/api/v1/browser/feishu-assist\` Body \`{"op": "fill_permission_json"}\` —— 自动批量写入并提交开通 7 项消息与表情权限；
+4. \`POST ${baseUrl}/api/v1/browser/feishu-assist\` Body \`{"op": "sync_local_bridge"}\` —— 触发 MuseDeck 本机内核自己在后台绑定凭证并建立飞书长连接（不向你返回任何密钥）；
+5. \`POST ${baseUrl}/api/v1/browser/feishu-assist\` Body \`{"op": "configure_events"}\` —— 开启「使用长连接接收事件」并订阅 \`im.message.receive_v1\`；
+6. \`POST ${baseUrl}/api/v1/browser/feishu-assist\` Body \`{"op": "prepare_version"}\` —— 进入版本页填好 \`1.0.0\` 草稿，完成后简短通知用户在飞书窗口点击「保存 → 申请线上发布」即可！`;
 
       broadcast('autopilot:feishuProgress', {
         message: '🤖 已将飞书界面导航任务交由 Muse 智能接管（本地隐私脱敏护盾已开启，Muse 零接触密钥）...'

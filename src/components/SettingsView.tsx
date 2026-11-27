@@ -393,7 +393,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           <Sliders className="h-4 w-4 text-[#52525b]" />
           <h2 className="text-[13.5px] font-semibold text-[#111827]">软件设置</h2>
         </div>
-        <span className="font-mono text-[11px] text-[#8a8f98]">MuseDeck v0.7.0</span>
+        <span className="font-mono text-[11px] text-[#8a8f98]">MuseDeck v0.7.1</span>
       </header>
 
       <div className="flex-1 overflow-y-auto px-6 py-6">
@@ -1143,7 +1143,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
                     <div className="flex items-center gap-2 font-medium text-[#111827]">
                       <span>软件版本与在线更新</span>
                       <span className="rounded-md bg-[#f4f4f5] px-2 py-0.5 font-mono text-[11px] text-[#52525b]">
-                        v0.7.0
+                        v0.7.1
                       </span>
                     </div>
                     <div className="mt-0.5 text-[11.5px] text-[#71717a]">

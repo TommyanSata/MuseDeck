@@ -1475,17 +1475,36 @@ export class ControlServer {
         if (req.method === 'POST' && pathname === '/api/v1/browser/feishu-assist') {
           const body = await this.readBody(req);
           const opRaw = String(body.op || 'status').trim();
-          if (
-            opRaw !== 'status' &&
-            opRaw !== 'fill_permission_json' &&
-            opRaw !== 'sync_local_bridge'
-          ) {
+          const validOps = new Set([
+            'status',
+            'create_or_enter_app',
+            'add_bot_capability',
+            'fill_permission_json',
+            'sync_local_bridge',
+            'configure_events',
+            'prepare_version'
+          ]);
+          if (!validOps.has(opRaw)) {
             this.sendJson(res, 400, {
-              error: 'Invalid op; expected status, fill_permission_json, or sync_local_bridge'
+              error:
+                'Invalid op; expected status, create_or_enter_app, add_bot_capability, fill_permission_json, sync_local_bridge, configure_events, or prepare_version'
             });
             return;
           }
-          const result = await this.localBrowser.feishuAssist(opRaw);
+          const result = await this.localBrowser.feishuAssist(
+            opRaw as
+              | 'status'
+              | 'create_or_enter_app'
+              | 'add_bot_capability'
+              | 'fill_permission_json'
+              | 'sync_local_bridge'
+              | 'configure_events'
+              | 'prepare_version',
+            {
+              botName: body.botName ? String(body.botName) : undefined,
+              botDesc: body.botDesc ? String(body.botDesc) : undefined
+            }
+          );
           this.sendJson(res, 200, result);
           return;
         }
