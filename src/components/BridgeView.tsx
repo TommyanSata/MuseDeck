@@ -33,8 +33,18 @@ export const BridgeView: React.FC<BridgeViewProps> = ({ state, feishuStatus }) =
   const [showGuide, setShowGuide] = useState(false);
   const [botNameDraft, setBotNameDraft] = useState('MuseDeck');
   const [autoRunning, setAutoRunning] = useState(false);
+  const [museCoPilotRunning, setMuseCoPilotRunning] = useState(false);
   const [autoTip, setAutoTip] = useState('');
   const [autoStepReport, setAutoStepReport] = useState<FeishuAutoStepReport[]>([]);
+
+  useEffect(() => {
+    if (state.feishu.appId && state.feishu.appId !== appId) {
+      setAppId(state.feishu.appId);
+    }
+    if (state.feishu.appSecret && state.feishu.appSecret !== appSecret) {
+      setAppSecret(state.feishu.appSecret);
+    }
+  }, [state.feishu.appId, state.feishu.appSecret]);
 
   useEffect(() => {
     void window.fmc.getTunnelStatus().then((st) => {
@@ -177,28 +187,58 @@ export const BridgeView: React.FC<BridgeViewProps> = ({ state, feishuStatus }) =
               </div>
 
               <div className="space-y-3 text-[12.5px]">
-                {/* One-Click Local Feishu Auto-Pilot */}
-                <div className="rounded-xl border border-[#eaecef] bg-[#fafafa] p-3">
-                  <div className="text-[11.5px] font-semibold text-[#111827]">
-                    ⚡ 扫码后一键自动代配飞书机器人（走本机 IP）
+                {/* Privacy-Shielded Muse Feishu Co-Pilot + Local Fallback */}
+                <div className="rounded-xl border border-[#18181b] bg-[#fafafa] p-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="text-[11.5px] font-semibold text-[#111827]">
+                      🤖 让 Muse 智能接管飞书配置（推荐 · 本地隐私脱敏护盾）
+                    </div>
+                    <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-800">
+                      Muse 0 接触密钥
+                    </span>
                   </div>
-                  <div className="mt-0.5 text-[11px] text-[#71717a]">
-                    弹出本地开放平台窗口，手机飞书扫码登录后再点一次即可自动建应用、导权限并提取凭证连接
+                  <div className="mt-1 text-[11px] leading-relaxed text-[#52525b]">
+                    弹出本地飞书开放平台窗口，用手机飞书<strong>扫码登录</strong>后点下方按钮：Muse 将通过可视化页面快照智能点选建应用、开机器人、导权限与配事件；所有 App Secret 密钥均由本机底层自动屏蔽并暗中托管连线，<strong>绝不外传给 Muse</strong>。
                   </div>
-                  <div className="mt-2 flex gap-2">
+                  <div className="mt-2 flex flex-wrap gap-2">
                     <input
                       value={botNameDraft}
                       onChange={(e) => setBotNameDraft(e.target.value)}
                       placeholder="机器人名称（如 MuseDeck）"
-                      className="min-w-0 flex-1 rounded-lg border border-[#e4e4e7] bg-white px-2.5 py-1.5 text-[12px] outline-none focus:border-[#18181b]"
+                      className="min-w-[140px] flex-1 rounded-lg border border-[#e4e4e7] bg-white px-2.5 py-1.5 text-[12px] outline-none focus:border-[#18181b]"
                     />
                     <button
                       type="button"
-                      disabled={autoRunning}
+                      disabled={museCoPilotRunning || autoRunning}
+                      onClick={async () => {
+                        setMuseCoPilotRunning(true);
+                        setAutoStepReport([]);
+                        setAutoTip('正在打开本地飞书窗口并检查登录与隐私脱敏通道...');
+                        try {
+                          const r = await window.fmc.runMuseFeishuCoPilot({
+                            botName: botNameDraft
+                          });
+                          setAutoTip(r.message);
+                        } finally {
+                          setMuseCoPilotRunning(false);
+                        }
+                      }}
+                      className="inline-flex shrink-0 items-center gap-1 rounded-lg bg-[#18181b] px-3 py-1.5 text-[11.5px] font-medium text-white hover:bg-[#27272a] disabled:opacity-50"
+                    >
+                      {museCoPilotRunning ? (
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                      ) : (
+                        <Sparkles className="h-3 w-3 text-amber-400" />
+                      )}
+                      {museCoPilotRunning ? '正在唤醒 Muse...' : '🤖 让 Muse 接管配置'}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={autoRunning || museCoPilotRunning}
                       onClick={async () => {
                         setAutoRunning(true);
                         setAutoStepReport([]);
-                        setAutoTip('正在打开本地飞书开放平台助手并分步可视执行...');
+                        setAutoTip('正在打开本地飞书开放平台助手并执行本地脚本代配...');
                         try {
                           const r = await window.fmc.runFeishuAutoPilot({
                             botName: botNameDraft,
@@ -212,18 +252,15 @@ export const BridgeView: React.FC<BridgeViewProps> = ({ state, feishuStatus }) =
                           setAutoRunning(false);
                         }
                       }}
-                      className="inline-flex shrink-0 items-center gap-1 rounded-lg bg-[#18181b] px-3 py-1.5 text-[11.5px] font-medium text-white hover:bg-[#27272a] disabled:opacity-50"
+                      className="inline-flex shrink-0 items-center gap-1 rounded-lg border border-[#e4e4e7] bg-white px-2.5 py-1.5 text-[11px] font-medium text-[#52525b] hover:bg-[#f4f4f5] hover:text-[#111827] disabled:opacity-50"
+                      title="无需连接 Muse，使用内置本地固定脚本代配"
                     >
-                      {autoRunning ? (
-                        <Loader2 className="h-3 w-3 animate-spin" />
-                      ) : (
-                        <Sparkles className="h-3 w-3" />
-                      )}
-                      {autoRunning ? '自动代配中...' : '一键自动代配'}
+                      {autoRunning ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+                      本地脚本代配
                     </button>
                   </div>
                   {autoTip && (
-                    <div className="mt-1.5 text-[11px] leading-relaxed text-[#3f3f46]">
+                    <div className="mt-2 rounded-lg border border-[#eaecef] bg-white px-2.5 py-2 text-[11px] leading-relaxed text-[#3f3f46]">
                       <div className="font-medium text-[#111827]">{autoTip}</div>
                       {autoStepReport.length > 0 && (
                         <ul className="mt-1.5 space-y-1 border-t border-[#eaecef] pt-1.5">

@@ -1,4 +1,5 @@
-import { RunningTaskInfo } from './cliRunner';
+import { DispatchRequest, RunningTaskInfo } from './cliRunner';
+import { QuotaManager } from './quotaManager';
 import { FmcStore, WorkflowConfig } from './store';
 
 export type WorkflowPhase =
@@ -8,6 +9,7 @@ export type WorkflowPhase =
   | 'running'
   | 'reviewing'
   | 'awaiting_user'
+  | 'paused_quota'
   | 'paused_budget'
   | 'completed';
 
@@ -38,34 +40,47 @@ export interface WorkflowRunState {
   planApproved?: boolean;
   lastSummary?: string;
   pauseReason?: string;
+  quotaRetryAt?: string;
+  lastHandoffFrom?: string;
   updatedAt: string;
 }
 
 interface CompletedBatchItem {
   taskId: string;
+  projectId: string;
   agentId: string;
   model: string;
   status: 'done' | 'error' | 'cancelled';
   cleanOutput: string;
   diffStat?: string;
+  cwd?: string;
+  prompt: string;
+  quotaExhausted?: boolean;
+  quotaReason?: string;
+  quotaRetryAfterMs?: number;
   tokens: number;
+}
+
+interface PendingQuotaResumeTask {
+  projectId: string;
+  agentId: string;
+  model?: string;
+  prompt: string;
+  repoPath?: string;
 }
 
 export function extractTokensFromOutput(prompt: string, output: string): number {
   const normalized = (output || '').replace(/\r\n/g, '\n');
-  // 1. Codex CLI exact format: "tokens used\n19,531"
   const codexMatch = normalized.match(/tokens used\s*\n\s*([\d,]+)/i);
   if (codexMatch) {
     const n = Number(codexMatch[1].replace(/,/g, ''));
     if (Number.isFinite(n) && n > 0) return n;
   }
-  // 2. Generic JSON/CLI format: "total_tokens": 12345
   const genericMatch = normalized.match(/total[_ ]tokens["']?\s*[:=]\s*([\d,]+)/i);
   if (genericMatch) {
     const n = Number(genericMatch[1].replace(/,/g, ''));
     if (Number.isFinite(n) && n > 0) return n;
   }
-  // 3. Fallback estimate (~3 chars per token across mixed CJK/code)
   const chars = (prompt || '').length + normalized.length;
   return Math.max(100, Math.round(chars / 3));
 }
@@ -78,7 +93,7 @@ function cleanBriefOutput(raw: string): string {
     .trim();
   const afterTokens = normalized.match(/\ntokens used\n[\d,]+\s*\n([\s\S]+)$/i);
   const body = afterTokens?.[1]?.trim() || normalized;
-  return body.length > 1800 ? `${body.slice(0, 1800)}\n...(已截断，完整内容见 FMC 桌面端)` : body;
+  return body.length > 1800 ? `${body.slice(0, 1800)}\n...(已截断，完整内容见 MuseDeck 桌面端)` : body;
 }
 
 export class WorkflowManager {
@@ -86,11 +101,16 @@ export class WorkflowManager {
   private onStatus: (status: WorkflowRunState) => void;
   private wakeMuse: (text: string) => Promise<{ ok: boolean; message: string }>;
   private notifyFeishu: (text: string) => Promise<boolean>;
+  private quotas?: QuotaManager;
+  private redispatchTask?: (req: DispatchRequest) => Promise<RunningTaskInfo>;
 
   private run: WorkflowRunState;
   private batchResults: CompletedBatchItem[] = [];
   private taskPrompts = new Map<string, string>();
   private batchTimer: NodeJS.Timeout | null = null;
+  private quotaResumeTimer: NodeJS.Timeout | null = null;
+  private quotaRetryCount = 0;
+  private pendingQuotaTasks: PendingQuotaResumeTask[] = [];
 
   constructor(
     store: FmcStore,
@@ -103,6 +123,25 @@ export class WorkflowManager {
     this.wakeMuse = wakeMuse;
     this.notifyFeishu = notifyFeishu;
     this.run = this.createIdleRun();
+  }
+
+  attachQuotaServices(
+    quotas: QuotaManager,
+    redispatchTask: (req: DispatchRequest) => Promise<RunningTaskInfo>
+  ): void {
+    this.quotas = quotas;
+    this.redispatchTask = redispatchTask;
+  }
+
+  private clearTimers(): void {
+    if (this.batchTimer) {
+      clearTimeout(this.batchTimer);
+      this.batchTimer = null;
+    }
+    if (this.quotaResumeTimer) {
+      clearTimeout(this.quotaResumeTimer);
+      this.quotaResumeTimer = null;
+    }
   }
 
   private getConfig(): WorkflowConfig {
@@ -151,11 +190,10 @@ export class WorkflowManager {
   /** Called when a user sends a new high-level requirement to Muse (desktop or Feishu) */
   startNewGoal(goal: string): void {
     const cfg = this.getConfig();
-    if (this.batchTimer) {
-      clearTimeout(this.batchTimer);
-      this.batchTimer = null;
-    }
+    this.clearTimers();
     this.batchResults = [];
+    this.pendingQuotaTasks = [];
+    this.quotaRetryCount = 0;
     const approvalMode = cfg.planApprovalMode || 'adaptive';
     this.run = {
       id: `wf-${Date.now()}`,
@@ -244,10 +282,8 @@ export class WorkflowManager {
 
   onTaskDispatched(task: RunningTaskInfo, prompt: string, source: 'user' | 'muse' | 'feishu'): void {
     if (source !== 'muse') return;
-    if (this.batchTimer) {
-      clearTimeout(this.batchTimer);
-      this.batchTimer = null;
-    }
+    this.clearTimers();
+    this.run.quotaRetryAt = undefined;
     const cfg = this.getConfig();
     if (this.run.phase === 'idle' || this.run.phase === 'completed' || this.run.phase === 'awaiting_user') {
       this.run = {
@@ -261,6 +297,7 @@ export class WorkflowManager {
     } else if (this.run.activeTaskIds.length === 0) {
       this.run.round += 1;
       this.run.phase = 'running';
+      this.run.pauseReason = undefined;
       this.batchResults = [];
     }
 
@@ -274,8 +311,13 @@ export class WorkflowManager {
     if (idx === -1) return;
 
     this.run.activeTaskIds.splice(idx, 1);
-    const prompt = this.taskPrompts.get(task.taskId) || '';
+    const prompt = this.taskPrompts.get(task.taskId) || task.prompt || '';
     this.taskPrompts.delete(task.taskId);
+
+    if (task.status === 'done') {
+      this.quotas?.clearRuntimeExhausted(task.agentId);
+      this.quotaRetryCount = 0;
+    }
 
     const tokens = extractTokensFromOutput(prompt, task.output);
     this.run.tokensUsed += tokens;
@@ -283,17 +325,22 @@ export class WorkflowManager {
 
     this.batchResults.push({
       taskId: task.taskId,
+      projectId: task.projectId,
       agentId: task.agentId,
       model: task.model,
       status: task.status === 'running' ? 'done' : task.status,
       cleanOutput: cleanBriefOutput(task.output),
       diffStat: task.diffStat,
+      cwd: task.cwd || task.worktreePath,
+      prompt,
+      quotaExhausted: task.quotaExhausted,
+      quotaReason: task.quotaReason,
+      quotaRetryAfterMs: task.quotaRetryAfterMs,
       tokens
     });
 
     this.emit();
 
-    // Wait briefly (2.5s) after last active task finishes in case Muse dispatched multiple parallel tasks sequentially
     if (this.run.activeTaskIds.length === 0) {
       if (this.batchTimer) clearTimeout(this.batchTimer);
       this.batchTimer = setTimeout(() => {
@@ -303,12 +350,54 @@ export class WorkflowManager {
   }
 
   private triggerPause(reason: string): void {
+    this.clearTimers();
     this.run.phase = 'paused_budget';
+    this.run.quotaRetryAt = undefined;
     this.run.pauseReason = reason;
     this.emit();
     void this.notifyFeishu(
-      `⚠️ 【FMC 工作流已自动暂停】\n原因：${reason}\n已完成子任务：${this.run.completedTaskCount} 个，累计消耗约 ${Math.round(this.run.tokensUsed / 1000)}k tokens。\n请在 FMC 桌面端点击「追加预算继续」或直接回复修改意见。`
+      `⚠️ 【MuseDeck 工作流已自动暂停】\n原因：${reason}\n已完成子任务：${this.run.completedTaskCount} 个，累计消耗约 ${Math.round(this.run.tokensUsed / 1000)}k tokens。\n请在桌面端点击继续或直接回复修改意见。`
     );
+  }
+
+  /** Immediately resume tasks that were waiting for quota cooldown */
+  async retryQuotaNow(): Promise<WorkflowRunState> {
+    if (this.quotaResumeTimer) {
+      clearTimeout(this.quotaResumeTimer);
+      this.quotaResumeTimer = null;
+    }
+    this.run.quotaRetryAt = undefined;
+    this.run.pauseReason = undefined;
+
+    const tasksToRun = [...this.pendingQuotaTasks];
+    this.pendingQuotaTasks = [];
+
+    if (tasksToRun.length > 0 && this.redispatchTask) {
+      this.run.phase = 'running';
+      this.emit();
+      for (const item of tasksToRun) {
+        this.quotas?.clearRuntimeExhausted(item.agentId);
+        const resumedPrompt = `【额度恢复自动续跑】请检查当前工作区已有代码改动，直接接着完成未竟任务（无需重复已完成部分）：\n\n${item.prompt}`;
+        const dispatched = await this.redispatchTask({
+          projectId: item.projectId,
+          agentId: item.agentId,
+          model: item.model || undefined,
+          prompt: resumedPrompt,
+          source: 'muse',
+          repoPath: item.repoPath,
+          useWorktree: false
+        });
+        this.onTaskDispatched(dispatched, resumedPrompt, 'muse');
+      }
+      return this.getStatus();
+    }
+
+    this.run.phase = 'reviewing';
+    this.emit();
+    await this.wakeMuse(
+      '【额度冷却结束 · 请继续推进任务】用户或自动定时器已触发续跑，请检查当前工作流进度并继续派单完成剩余任务。'
+    );
+    return this.getStatus();
   }
 
   private async handleBatchCompleted(): Promise<void> {
@@ -319,6 +408,124 @@ export class WorkflowManager {
     const results = [...this.batchResults];
     this.batchResults = [];
 
+    // ==================== QUOTA EXHAUSTION SEAMLESS HANDOFF & AUTO-RESUME ====================
+    const quotaHitItems = results.filter((r) => r.status === 'error' && r.quotaExhausted);
+    if (quotaHitItems.length > 0) {
+      for (const q of quotaHitItems) {
+        this.quotas?.markRuntimeExhausted(
+          q.agentId,
+          q.quotaReason || 'CLI 额度或速率达到上限',
+          q.quotaRetryAfterMs || 30 * 60_000
+        );
+      }
+      // Do NOT penalize round count or stall breaker when hitting provider quota limits!
+      this.run.round = Math.max(0, this.run.round - 1);
+
+      const st = this.store.getState();
+      const targetProj =
+        st.projects.find((p) => p.id === quotaHitItems[0].projectId) || st.projects[0];
+      const exhaustedSet = new Set(quotaHitItems.map((q) => q.agentId));
+      const backupClis = Object.entries(st.cliConfigs || {})
+        .filter(([id, c]) => {
+          if (!c.enabled || exhaustedSet.has(id)) return false;
+          if (this.quotas?.isRuntimeExhausted(id)) return false;
+          if (
+            targetProj?.allowedClis &&
+            targetProj.allowedClis.length > 0 &&
+            !targetProj.allowedClis.includes(id)
+          ) {
+            return false;
+          }
+          return true;
+        })
+        .map(([id, c]) => ({
+          id,
+          defaultModel: c.defaultModel || 'default',
+          weight: c.weight ?? 4
+        }))
+        .sort((a, b) => b.weight - a.weight);
+
+      const exhaustedNames = Array.from(exhaustedSet).join(', ');
+
+      // Case A: Healthy backup CLI(s) available -> Instant Seamless Cross-CLI Handoff via Muse!
+      if (backupClis.length > 0 && cfg.autoWakeMuse) {
+        this.run.projectApproved = true;
+        this.run.planApproved = true;
+        this.run.phase = 'reviewing';
+        this.run.lastHandoffFrom = exhaustedNames;
+        this.run.pauseReason = `检测到 ${exhaustedNames} 额度触顶，正在自动移交 ${backupClis.map((b) => b.id).join('/')} 接力`;
+        this.emit();
+
+        void this.notifyFeishu(
+          `⚡ 【额度触顶 · 自动无缝接力】\n检测到 [${exhaustedNames}] 触发额度/速率上限（${quotaHitItems[0].quotaReason || 'Usage limit'}）。\nMuseDeck 已自动唤醒 Muse 将同一工作区无缝移交给备选工具 [${backupClis.map((b) => b.id).join(' / ')}] 接力完成，无需你手动干预！`
+        );
+
+        const handoffDetails = quotaHitItems
+          .map((q, i) => {
+            const diffInfo = q.diffStat ? `\n- 已产生的半成品改动 (Git Status/Diff):\n${q.diffStat}` : '\n- 当前尚未产生代码改动，可直接从头实现';
+            return `### 待接力子任务 ${i + 1}
+- 原执行 CLI: \`${q.agentId}\`（因限额中断：${q.quotaReason || 'rate/usage limit'}）
+- 所属项目: 《${targetProj?.name || '默认总控台'}》 (projectId: \`${q.projectId}\`)
+- 接力工作目录 (repoPath): \`${q.cwd || targetProj?.repoPath || ''}\`${diffInfo}
+- 原任务指令:\n${q.prompt}`;
+          })
+          .join('\n\n');
+
+        const handoffPrompt = `【⚡ CLI 额度触顶 · 自动跨工具无缝接力】
+刚刚执行的 \`${exhaustedNames}\` 触发了额度/速率限制，已被本地临时标记为冷却状态。
+当前工作流已保持 \`planApproved = true\`，**请勿重复询问用户审批**！
+
+【当前健康可用的备选 CLI（已按用户优先级排序）】
+${backupClis.map((b) => `- \`${b.id}\` (默认模型: \`${b.defaultModel}\`)`).join('\n')}
+
+${handoffDetails}
+
+【无缝接力要求】
+请立即从上述健康备选 CLI 中挑选最合适的一个，调用 \`POST /api/v1/dispatch\`：
+1. 传入上面给出的相同 \`repoPath\`，并将 \`useWorktree\` 设为 \`false\`（直接在原工作区/分支上检查已有进展并接着完成剩余工作！）；
+2. 在 \`prompt\` 中提醒接力 CLI 先查看当前目录已有改动，衔接完成未竟部分。`;
+
+        await this.wakeMuse(handoffPrompt);
+        return;
+      }
+
+      // Case B: Single-CLI user (no other enabled healthy CLI) -> Smart Cooldown Wait & Auto-Resume!
+      if (this.quotaRetryCount < 3) {
+        this.quotaRetryCount += 1;
+        const delayMs =
+          quotaHitItems[0].quotaRetryAfterMs ||
+          (this.quotaRetryCount === 1 ? 2 * 60_000 : 15 * 60_000);
+        const waitMin = Math.max(1, Math.round(delayMs / 60_000));
+        this.pendingQuotaTasks = quotaHitItems.map((q) => ({
+          projectId: q.projectId,
+          agentId: q.agentId,
+          model: q.model,
+          prompt: q.prompt,
+          repoPath: q.cwd
+        }));
+        this.run.phase = 'paused_quota';
+        this.run.quotaRetryAt = new Date(Date.now() + delayMs).toISOString();
+        this.run.pauseReason = `[${exhaustedNames}] 额度触顶，约 ${waitMin} 分钟后自动续跑（第 ${this.quotaRetryCount}/3 次）`;
+        this.emit();
+
+        if (this.quotaResumeTimer) clearTimeout(this.quotaResumeTimer);
+        this.quotaResumeTimer = setTimeout(() => {
+          void this.retryQuotaNow();
+        }, delayMs);
+
+        void this.notifyFeishu(
+          `⏳ 【额度冷却等待 · 到点自动续跑】\n[${exhaustedNames}] 暂时触发限额（${quotaHitItems[0].quotaReason || 'Usage limit'}），当前未启用其他备选 CLI。\n系统将在约 ${waitMin} 分钟后自动在同一工作区续跑（第 ${this.quotaRetryCount}/3 次）；你也可开启其他 CLI，或回复「继续」立即重试。`
+        );
+        return;
+      }
+
+      this.triggerPause(
+        `[${exhaustedNames}] 连续 3 次冷却等待后额度仍未恢复；请在 CLI 管理页启用备选工具接力，或等额度重置后点击「立即续跑」`
+      );
+      return;
+    }
+
+    // ==================== NORMAL BATCH COMPLETION ====================
     const allFailed = results.every((r) => r.status === 'error');
     if (allFailed) {
       this.run.consecutiveStalls += 1;
@@ -326,7 +533,6 @@ export class WorkflowManager {
       this.run.consecutiveStalls = 0;
     }
 
-    // Guardrail 1: Budget exhausted
     if (this.run.tokenBudget > 0 && this.run.tokensUsed >= this.run.tokenBudget) {
       this.triggerPause(
         `单次需求 Token 消耗已达预算阈值（${Math.round(this.run.tokensUsed / 1000)}k / ${Math.round(this.run.tokenBudget / 1000)}k）`
@@ -334,7 +540,6 @@ export class WorkflowManager {
       return;
     }
 
-    // Guardrail 2: Consecutive stall / error circuit breaker
     if (cfg.stallLimit > 0 && this.run.consecutiveStalls >= cfg.stallLimit) {
       this.triggerPause(`连续 ${this.run.consecutiveStalls} 轮子任务执行出错，已触发防空转熔断`);
       return;
@@ -500,10 +705,6 @@ ${nextInstruction}`;
     return this.getStatus();
   }
 
-  /**
-   * Unlocks projectApproved / planApproved silently without sending a duplicate wakeup prompt,
-   * used when the user approves directly inside Muse Native Chat or clicks a Muse config-choice button!
-   */
   markApprovedSilently(stage: 'project' | 'plan', onProjectsChanged?: () => void): WorkflowRunState {
     if (stage === 'project' || !this.run.projectApproved) {
       const prop = this.run.pendingProjectProposal;
@@ -543,7 +744,6 @@ ${nextInstruction}`;
     return this.getStatus();
   }
 
-  /** Called by Muse via POST /api/v1/workflow/ask-user when ready for user verification */
   async markAwaitingUser(summary: string, sendToFeishu = true): Promise<boolean> {
     this.run.phase = 'awaiting_user';
     this.run.lastSummary = summary;
@@ -558,6 +758,7 @@ ${nextInstruction}`;
   }
 
   approveByUser(): WorkflowRunState {
+    this.clearTimers();
     this.run.phase = 'completed';
     this.run.pauseReason = undefined;
     this.emit();
@@ -565,18 +766,23 @@ ${nextInstruction}`;
   }
 
   async addBudgetAndResume(extraTokens = 100000): Promise<WorkflowRunState> {
+    this.clearTimers();
     this.run.tokenBudget = Math.max(this.run.tokensUsed, this.run.tokenBudget) + extraTokens;
     this.run.consecutiveStalls = 0;
     this.run.pauseReason = undefined;
     this.run.phase = 'reviewing';
     this.emit();
     await this.wakeMuse(
-      `【FMC 通知】用户已追加 +${Math.round(extraTokens / 1000)}k tokens 预算（新上限 ${Math.round(this.run.tokenBudget / 1000)}k），工作流已解除暂停，请继续推进未完成的任务。`
+      `【MuseDeck 通知】用户已追加 +${Math.round(extraTokens / 1000)}k tokens 预算（新上限 ${Math.round(this.run.tokenBudget / 1000)}k），工作流已解除暂停，请继续推进未完成的任务。`
     );
     return this.getStatus();
   }
 
   async sendUserFeedback(feedback: string): Promise<WorkflowRunState> {
+    if (this.run.phase === 'paused_quota' && /^(继续|重试|续跑|retry|continue)$/i.test(feedback.trim())) {
+      return this.retryQuotaNow();
+    }
+    this.clearTimers();
     this.run.round = 0;
     this.run.consecutiveStalls = 0;
     this.run.pauseReason = undefined;
@@ -589,11 +795,10 @@ ${nextInstruction}`;
   }
 
   reset(): WorkflowRunState {
-    if (this.batchTimer) {
-      clearTimeout(this.batchTimer);
-      this.batchTimer = null;
-    }
+    this.clearTimers();
     this.batchResults = [];
+    this.pendingQuotaTasks = [];
+    this.quotaRetryCount = 0;
     this.run = this.createIdleRun();
     this.emit();
     return this.getStatus();

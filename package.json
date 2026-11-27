@@ -1,6 +1,6 @@
 {
   "name": "fmc-feishu-muse-commander",
-  "version": "0.6.3",
+  "version": "0.7.0",
   "description": "MuseDeck - Multi-CLI AI Orchestration & Feishu/Muse Desktop Workbench",
   "author": "MuseDeck",
   "main": "dist-electron/main.js",

@@ -5,6 +5,7 @@ import path from 'path';
 import {
   app,
   BrowserWindow,
+  clipboard,
   dialog,
   ipcMain,
   Menu,
@@ -37,7 +38,7 @@ import {
   testCliEndpoint
 } from './cliScanner';
 import { buildMuseBrief, ControlServer, isWithinQuietHours } from './controlServer';
-import { FeishuBridge } from './feishuBridge';
+import { FeishuBridge, FeishuIncomingContext } from './feishuBridge';
 import { QuotaManager } from './quotaManager';
 import { readLocalCliSessionMessages, scanLocalCliSessions } from './sessionScanner';
 import { AppSettings, CliId, CliUserConfig, FmcStore, WorkflowConfig } from './store';
@@ -467,7 +468,10 @@ function createMainWindow(): void {
   });
 }
 
-async function sendTextToMuseChat(msgText: string): Promise<{ ok: boolean; message: string }> {
+async function sendTextToMuseChat(
+  msgText: string,
+  imagePaths?: string[]
+): Promise<{ ok: boolean; message: string }> {
   const view = ensureEmbeddedView('muse');
 
   // Wait for page load to settle if still navigating (max 4s, exits immediately once ready)
@@ -477,6 +481,46 @@ async function sendTextToMuseChat(msgText: string): Promise<{ ok: boolean; messa
   }
 
   try {
+    // Optional: natively paste user-sent Feishu screenshots into Muse's composer before text!
+    if (imagePaths && imagePaths.length > 0) {
+      const focusedInput = (await view.webContents.executeJavaScript(
+        `(() => {
+          const inp =
+            document.querySelector('textarea') ||
+            document.querySelector('[contenteditable="true"][role="textbox"]') ||
+            document.querySelector('[contenteditable="true"]');
+          if (inp && inp instanceof HTMLElement) {
+            inp.focus({ preventScroll: true });
+            return true;
+          }
+          return false;
+        })()`,
+        true
+      )) as boolean;
+
+      if (focusedInput) {
+        const prevText = clipboard.readText();
+        const prevImg = clipboard.readImage();
+        try {
+          for (const imgPath of imagePaths.slice(0, 4)) {
+            if (!fs.existsSync(imgPath)) continue;
+            const nImg = nativeImage.createFromPath(imgPath);
+            if (nImg.isEmpty()) continue;
+            clipboard.writeImage(nImg);
+            view.webContents.focus();
+            view.webContents.paste();
+            await new Promise((r) => setTimeout(r, 600));
+          }
+        } finally {
+          if (!prevImg.isEmpty()) {
+            clipboard.writeImage(prevImg);
+          } else {
+            clipboard.writeText(prevText);
+          }
+        }
+      }
+    }
+
     const js = `
       (async () => {
         const text = ${JSON.stringify(msgText)};
@@ -2358,53 +2402,57 @@ function registerIpcHandlers(): void {
     }
   );
 
+  const ensureFeishuConsoleWc = async (): Promise<Electron.WebContents> => {
+    if (
+      activeEmbedded === 'feishu' &&
+      embeddedViews.feishu &&
+      !embeddedViews.feishu.webContents.isDestroyed()
+    ) {
+      return embeddedViews.feishu.webContents;
+    }
+    if (!feishuPopupWin || feishuPopupWin.isDestroyed()) {
+      const feishuSes = session.fromPartition('persist:fmc-feishu');
+      feishuPopupWin = new BrowserWindow({
+        width: 1080,
+        height: 760,
+        title: 'MuseDeck · 飞书开放平台受控窗口（本地隐私脱敏护盾已开启 · 密钥零外泄）',
+        autoHideMenuBar: true,
+        webPreferences: {
+          session: feishuSes,
+          contextIsolation: true,
+          nodeIntegration: false,
+          sandbox: true
+        }
+      });
+      const chromeUa = feishuPopupWin.webContents.getUserAgent().replace(/Electron\/[\d.]+ /, '');
+      feishuPopupWin.webContents.setUserAgent(chromeUa);
+      feishuPopupWin.webContents.setWindowOpenHandler(({ url }) => {
+        if (
+          /^https:\/\/open\.feishu\.cn\/app(\/|$|\?)/i.test(url) ||
+          /^https:\/\/(accounts|passport)\.feishu\.cn\//i.test(url)
+        ) {
+          void feishuPopupWin?.webContents.loadURL(url);
+        }
+        return { action: 'deny' };
+      });
+      feishuPopupWin.on('closed', () => {
+        feishuPopupWin = null;
+      });
+      await feishuPopupWin.loadURL('https://open.feishu.cn/app');
+    } else {
+      feishuPopupWin.show();
+      feishuPopupWin.focus();
+    }
+    return feishuPopupWin.webContents;
+  };
+
   ipcMain.handle(
     'autopilot:feishu',
     async (
       _ev,
       params?: { botName?: string; botDesc?: string; existingAppId?: string }
     ) => {
-      let targetWc: Electron.WebContents;
-      if (activeEmbedded === 'feishu' && embeddedViews.feishu && !embeddedViews.feishu.webContents.isDestroyed()) {
-        targetWc = embeddedViews.feishu.webContents;
-      } else {
-        if (!feishuPopupWin || feishuPopupWin.isDestroyed()) {
-          const feishuSes = session.fromPartition('persist:fmc-feishu');
-          feishuPopupWin = new BrowserWindow({
-            width: 1080,
-            height: 760,
-            title: 'MuseDeck · 飞书开放平台本地一键代配助手（扫码登录后全程自动填表）',
-            autoHideMenuBar: true,
-            webPreferences: {
-              session: feishuSes,
-              contextIsolation: true,
-              nodeIntegration: false,
-              sandbox: true
-            }
-          });
-          const chromeUa = feishuPopupWin.webContents.getUserAgent().replace(/Electron\/[\d.]+ /, '');
-          feishuPopupWin.webContents.setUserAgent(chromeUa);
-          // Prevent any target="_blank" link from spawning extra windows or jumping to doc pages
-          feishuPopupWin.webContents.setWindowOpenHandler(({ url }) => {
-            if (
-              /^https:\/\/open\.feishu\.cn\/app(\/|$|\?)/i.test(url) ||
-              /^https:\/\/(accounts|passport)\.feishu\.cn\//i.test(url)
-            ) {
-              void feishuPopupWin?.webContents.loadURL(url);
-            }
-            return { action: 'deny' };
-          });
-          feishuPopupWin.on('closed', () => {
-            feishuPopupWin = null;
-          });
-          await feishuPopupWin.loadURL('https://open.feishu.cn/app');
-        } else {
-          feishuPopupWin.show();
-          feishuPopupWin.focus();
-        }
-        targetWc = feishuPopupWin.webContents;
-      }
-
+      const targetWc = await ensureFeishuConsoleWc();
       return runFeishuLocalAutoPilot({
         wc: targetWc,
         botName: params?.botName,
@@ -2418,6 +2466,91 @@ function registerIpcHandlers(): void {
           return status.state === 'connected';
         }
       });
+    }
+  );
+
+  ipcMain.handle(
+    'autopilot:museFeishu',
+    async (_ev, params?: { botName?: string; botDesc?: string }) => {
+      const st = store.getState();
+      const baseUrl = (tunnel?.getStatus().url || st.controlApi.tunnelUrl || '')
+        .trim()
+        .replace(/\/+$/, '');
+      if (!baseUrl) {
+        return {
+          ok: false,
+          needTunnel: true,
+          message: '请先开启公网 443 隧道（Tailscale / Serveo）并完成 Muse 站点授权，随后即可让 Muse 智能接管配置！'
+        };
+      }
+
+      const targetWc = await ensureFeishuConsoleWc();
+      if (!targetWc.getURL().includes('open.feishu.cn')) {
+        await targetWc.loadURL('https://open.feishu.cn/app');
+        await new Promise((r) => setTimeout(r, 1500));
+      }
+
+      const loginState = (await targetWc
+        .executeJavaScript(
+          `(() => {
+            const href = location.href;
+            const txt = document.body?.innerText || '';
+            const onPassport = href.includes('accounts.feishu.cn') || href.includes('passport.feishu.cn');
+            const loggedIn = !onPassport && (txt.includes('企业自建应用') || txt.includes('凭证与基础信息') || txt.includes('添加应用能力') || /\\/app\\/cli_[a-zA-Z0-9]+/.test(href));
+            return { loggedIn };
+          })()`,
+          true
+        )
+        .catch(() => ({ loggedIn: false }))) as { loggedIn: boolean };
+
+      if (!loginState.loggedIn) {
+        return {
+          ok: false,
+          needLogin: true,
+          message:
+            '已在窗口中打开飞书开放平台，请先用手机飞书扫码登录（确认右上角企业与手机一致），进入后台后再点一次「🤖 让 Muse 智能接管配置」！'
+        };
+      }
+
+      localBrowser.bindFeishuWebContents(
+        targetWc,
+        async (extractedAppId, extractedSecret) => {
+          const status = await feishu.connect(extractedAppId, extractedSecret);
+          return status.state === 'connected';
+        },
+        (msg) => {
+          broadcast('autopilot:feishuProgress', { message: msg });
+        }
+      );
+
+      await syncLatestBriefToMuse(false);
+      const botName = (params?.botName || 'MuseDeck').trim() || 'MuseDeck';
+      const botDesc = (params?.botDesc || 'MuseDeck 本地多智能体调度助手').trim();
+
+      const coPilotPrompt = `【飞书后台可视化导航代配任务（本地隐私护盾已开启）】
+用户已在 MuseDeck 本地受控飞书窗口（target: "feishu"）完成扫码登录。请你通过本地浏览器接口帮用户完成飞书机器人后台的界面功能配置。
+🔒 隐私安全说明：所有应用密钥与敏感字段已由 MuseDeck 本地隐私护盾自动脱敏为 [REDACTED]，且本地长连接绑定由内核自己在后台完成，**你全程不需要、也严禁尝试读取任何密钥、密码或敏感凭证**，只做公开的界面按钮点击与表单填写：
+
+请使用 \`Authorization: Bearer ${st.controlApi.token}\` 依次执行以下步骤：
+1. 调用 \`POST ${baseUrl}/api/v1/browser/feishu-assist\` Body \`{"op": "status"}\` 查看当前飞书后台页面快照（elements 中的按钮 id 如 b1, b2）；
+2. 若 \`insideAppConsole\` 为 \`false\`：调用 \`POST ${baseUrl}/api/v1/browser/act\`（带 \`"target": "feishu"\`）点击「创建企业自建应用」，填入应用名称「${botName}」与应用描述「${botDesc}」并点击弹窗内的「创建」按钮，等待进入应用详情页；
+3. 检查左侧菜单若还没有「机器人」（\`hasBotCapabilityInMenu\` 为 \`false\`）：点击左侧「添加应用能力」，找到「机器人」卡片对应的「添加」按钮点击（只点添加按钮，不要点文档链接；若有确认弹窗则点确认）；
+4. 点击左侧菜单「权限管理」，点击页面上的「批量导入/导出权限」打开弹窗，然后直接调用 \`POST ${baseUrl}/api/v1/browser/feishu-assist\` Body \`{"op": "fill_permission_json"}\` 让本地助手写入所需权限模板，随后根据返回快照点击弹窗里的「下一步 / 确认新增权限」→「申请开通」（若提示已全部开通则关闭弹窗）；
+5. 调用一次 \`POST ${baseUrl}/api/v1/browser/feishu-assist\` Body \`{"op": "sync_local_bridge"}\` —— 这会让 MuseDeck 本地内核自己在后台建立好飞书长连接（不会向你返回任何密钥）；
+6. 点击左侧菜单「事件与回调」，将事件订阅方式切换为「使用长连接接收事件」并点击「保存」，随后点击「添加事件」，搜索 \`im.message.receive_v1\`（接收消息 v2.0）勾选并点击确认添加；
+7. 点击左侧菜单「版本管理与发布」，点击「创建版本」，填入应用版本号 \`1.0.0\` 与更新说明 \`MuseDeck 自动配置\`，完成后停留在当前页并在对话里简短通知用户点击页面底部的「保存 → 申请线上发布」即可！`;
+
+      broadcast('autopilot:feishuProgress', {
+        message: '🤖 已将飞书界面导航任务交由 Muse 智能接管（本地隐私脱敏护盾已开启，Muse 零接触密钥）...'
+      });
+      const sent = await sendTextToMuseChat(coPilotPrompt);
+      return sent.ok
+        ? {
+            ok: true,
+            message:
+              '🤖 Muse 已开始智能接管飞书后台配置！你可直接观察飞书窗口中的实时绿框操作（所有密钥均由本机底层自动脱敏托管，Muse 零接触任何隐私凭证）。'
+          }
+        : sent;
     }
   );
 
@@ -2563,6 +2696,7 @@ function registerIpcHandlers(): void {
   ipcMain.handle('workflow:addBudget', (_ev, extraTokens?: number) =>
     workflow.addBudgetAndResume(extraTokens || 100000)
   );
+  ipcMain.handle('workflow:retryQuota', () => workflow.retryQuotaNow());
   ipcMain.handle('workflow:feedback', (_ev, text: string) => workflow.sendUserFeedback(text));
   ipcMain.handle('workflow:reset', () => workflow.reset());
 }
@@ -2590,10 +2724,11 @@ app.whenReady().then(async () => {
     runner,
     (status) => broadcast('feishu:status', status),
     () => broadcast('state:changed', store.getState()),
-    async (text) => {
-      const trimmed = text.trim();
+    async (ctx: FeishuIncomingContext) => {
+      const trimmed = ctx.text.trim();
+      const hasImages = Boolean(ctx.imagePaths && ctx.imagePaths.length > 0);
       // Stage -1: Remote approve Muse site-access permission prompt directly from Feishu!
-      if (/^(总是允许此站点|总是允许|允许访问)$/i.test(trimmed)) {
+      if (!hasImages && /^(总是允许此站点|总是允许|允许访问)$/i.test(trimmed)) {
         const view = ensureEmbeddedView('muse');
         const clickedPerm = await view.webContents
           .executeJavaScript(
@@ -2621,7 +2756,7 @@ app.whenReady().then(async () => {
       }
 
       // Stage 0: Remote click on pending Muse interactive choice/permission buttons from Feishu!
-      if (pendingMuseActions.length > 0) {
+      if (!hasImages && pendingMuseActions.length > 0) {
         const numMatch = trimmed.match(/^(?:选|选择|点|点击|第)?\s*(\d+)\s*$/);
         let matchedAction: MuseRichAction | undefined;
         if (numMatch) {
@@ -2641,7 +2776,6 @@ app.whenReady().then(async () => {
               `(() => {
                 const el = document.querySelector('[data-fmc-action-id=${JSON.stringify(matchedAction.id)}]');
                 if (!el || !(el instanceof HTMLElement)) return false;
-                el.scrollIntoView({ block: 'center' });
                 el.click();
                 return true;
               })()`,
@@ -2661,8 +2795,17 @@ app.whenReady().then(async () => {
       }
 
       const wfStatus = workflow?.getStatus();
+      if (!hasImages && wfStatus?.phase === 'paused_quota' && /^(继续|重试|续跑|retry|continue)[！!。.\s]*$/i.test(trimmed)) {
+        await workflow.retryQuotaNow();
+        const chatId = store.getState().feishu.lastChatId;
+        if (chatId) {
+          lastDirectFeishuPushAt = Date.now();
+          void feishu.sendText(chatId, '⚡ 已立即触发续跑，正在检查原工作区并继续执行！');
+        }
+        return { ok: true, message: '已触发额度恢复立即续跑' };
+      }
       // Stage 1: Natural-language approval from Feishu when awaiting project routing approval
-      if (wfStatus?.phase === 'awaiting_project_approval') {
+      if (!hasImages && wfStatus?.phase === 'awaiting_project_approval') {
         if (/^(批准|同意|通过|开始|可以|好的?|没问题|行|ok|okay|yes|go|lgtm|approve|确认)[！!。.~～\s]*$/i.test(trimmed)) {
           const nextWf = await workflow.approveProject(() => broadcast('state:changed', store.getState()));
           const chatId = store.getState().feishu.lastChatId;
@@ -2679,7 +2822,7 @@ app.whenReady().then(async () => {
         return { ok: true, message: '已将项目归属修改意见发给 Muse 调整' };
       }
       // Stage 2: Natural-language approval or config-choice selection from Feishu when awaiting plan approval
-      if (wfStatus?.phase === 'awaiting_plan_approval') {
+      if (!hasImages && wfStatus?.phase === 'awaiting_plan_approval') {
         if (/^(批准|同意|通过|开始|开工|启动|可以|好的?|没问题|行|ok|okay|yes|go|lgtm|approve)[！!。.~～\s]*$/i.test(trimmed)) {
           await workflow.approvePlan();
           const chatId = store.getState().feishu.lastChatId;
@@ -2703,6 +2846,7 @@ app.whenReady().then(async () => {
       }
       // Natural-language approval from Feishu when awaiting user verification
       if (
+        !hasImages &&
         wfStatus?.phase === 'awaiting_user' &&
         /^(满意|通过|可以|ok|没问题|结项|完成|好|好的)[！!。.~～\s]*$/i.test(trimmed)
       ) {
@@ -2714,7 +2858,7 @@ app.whenReady().then(async () => {
         }
         return { ok: true, message: '工作流已验收结项' };
       }
-      if (wfStatus?.phase === 'awaiting_user' || wfStatus?.phase === 'paused_budget') {
+      if (!hasImages && (wfStatus?.phase === 'awaiting_user' || wfStatus?.phase === 'paused_budget')) {
         await workflow.sendUserFeedback(trimmed);
         return { ok: true, message: '已将修改意见发给 Muse 继续迭代' };
       }
@@ -2725,8 +2869,13 @@ app.whenReady().then(async () => {
         sawBusy: false,
         baselineMuseText: lastMuseMsg
       };
-      const prompt = `【来自手机飞书的消息】${trimmed}\n（若这是联网查资料、云端网页操作、日常探讨或回应你之前的主动思考追问，请直接发挥你的云端联网与网页操作能力处理，并调用 POST /api/v1/feishu/send 回复飞书；若是需要修改本地代码的新开发需求，再先查 GET /api/v1/projects 并调用 propose-project / propose-plan 派发本地 CLI。若有尚未定论的问题可记入 POST /api/v1/questions。）`;
-      return sendTextToMuseChat(prompt);
+      const threadTag = ctx.threadKey ? `（飞书话题串 #${ctx.threadKey.slice(-6)}）` : '';
+      const imgSuffix =
+        ctx.imagePaths && ctx.imagePaths.length > 0
+          ? `\n【附带飞书截图已同步粘贴并保存至本地：${ctx.imagePaths.join(' , ')} —— 你可直接查看图片，若需派发给本地 CLI 看图修 Bug，请将该本地图片路径写进 dispatch 的 prompt！】`
+          : '';
+      const prompt = `【来自手机飞书的消息】${threadTag}${trimmed}${imgSuffix}\n（若这是联网查资料、看图解答、云端网页操作、日常探讨或回应你之前的主动思考追问，请直接处理并调用 POST /api/v1/feishu/send 回复飞书；若是需要修改本地代码的新开发需求，再先查 GET /api/v1/projects 并调用 propose-project / propose-plan 派发本地 CLI。若有尚未定论的问题可记入 POST /api/v1/questions。）`;
+      return sendTextToMuseChat(prompt, ctx.imagePaths);
     }
   );
   workflow = new WorkflowManager(
@@ -2742,6 +2891,7 @@ app.whenReady().then(async () => {
   benchmarks = new BenchmarkManager();
   benchmarks.startDailyScheduler(store.getState().workflow?.autoFetchBenchmarks !== false);
   quotas = new QuotaManager(store);
+  workflow.attachQuotaServices(quotas, (req: DispatchRequest) => runner.dispatch(req));
   localBrowser = new LocalBrowserController();
   controlServer = new ControlServer(
     store,

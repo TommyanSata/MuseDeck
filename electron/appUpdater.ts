@@ -31,6 +31,14 @@ export interface WhatsNewInfo {
 }
 
 export const BUILTIN_RELEASE_HIGHLIGHTS: Record<string, { title: string; highlights: string[] }> = {
+  '0.7.0': {
+    title: '飞书双向看图与话题隔离 · 额度触顶无缝接力 · Muse 隐私脱敏接管飞书配置',
+    highlights: [
+      '飞书体感升级：收到消息 0.2 秒贴 👀 (OnIt) 表情，支持手机直接发报错截图给 Muse 与本地 CLI 看图修 Bug，并支持话题串回复隔离多任务',
+      '额度用完不断档：精准识别 CLI 429 / 限额报错，自动由 Muse 在同一工作区无缝移交备选 CLI 接力；单 CLI 时支持冷却倒计时自动续跑',
+      '重构初始向导顺序（先打通隧道与 Muse，再配飞书），新增「让 Muse 智能接管飞书配置」：内置本地隐私脱敏护盾，密钥全程本机自动托管、Muse 零接触任何敏感凭证'
+    ]
+  },
   '0.6.3': {
     title: '彻底修复飞书一键代配跳窗口与页面滚动点偏问题',
     highlights: [

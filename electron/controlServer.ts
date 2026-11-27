@@ -244,11 +244,12 @@ ${openQuestionsBlock}
 17. **【静默云端维护（严禁在对话中播报）】**：
    - 所有最新配置变更（100% 权重、启用 CLI、审批模式、未决议题）都会随每次接口 JSON 的 \`_livePolicy\` 字段实时下发，请直接以 \`_livePolicy\` 为准，无需用户重发协议。
    - 若接口 JSON 中附带 \`_silentCloudTasks\`（如更新评测榜单 \`POST /api/v1/benchmarks/update\`、补全未知模型能力画像 \`POST /api/v1/clis/model-profiles\`、补全 CLI 最新版本号 \`POST /api/v1/clis/updates-cache\`），请在工具调用阶段利用你的云端能力顺手静默 \`POST\` 回写，**严禁在给用户的聊天回复里提及这些后台缓存维护动作，确保对话 100% 纯净无冗余**！
-18. **【本机真实 IP 浏览器双通道（防云端 IP 风控 & 复用本地登录态）】**：
-   - 遇到对云端机房 IP 敏感或需复用本地登录态的网页时：若 \`_livePolicy.localBrowser.chromeExtensionInstalled\` 为 \`true\` 且用户开启了本机 Chrome 官方 \`Muse from Meta\` 插件，优先调用该本地插件；否则可直接静默调用 MuseDeck 内置本地 IP 浏览器接口：
-     - 打开网页并获取可交互快照：\`POST ${baseUrl}/api/v1/browser/open\` Body: \`{"url": "https://..."}\`
-     - 读取当前页面快照：\`GET ${baseUrl}/api/v1/browser/snapshot\`
-     - 点击 / 输入 / 按键 / 滚动：\`POST ${baseUrl}/api/v1/browser/act\` Body: \`{"action": "click" | "fill" | "press" | "scroll", "targetId": "b1", "text": "输入内容"}\`
+18. **【本机真实 IP 浏览器双通道 & 隐私脱敏飞书智能领航】**：
+   - 遇到对云端机房 IP 敏感或需复用本地登录态的网页时：若 \`_livePolicy.localBrowser.chromeExtensionInstalled\` 为 \`true\` 且用户开启了本机 Chrome 官方 \`Muse from Meta\` 插件，优先调用该本地插件；否则可直接调用 MuseDeck 内置本地 IP 浏览器接口（所有敏感密钥与手机号均已由本地隐私护盾自动脱敏屏蔽）：
+     - 打开网页并获取快照：\`POST ${baseUrl}/api/v1/browser/open\` Body: \`{"url": "https://...", "target": "default" | "feishu"}\`
+     - 读取当前页面快照：\`GET ${baseUrl}/api/v1/browser/snapshot?target=default|feishu\`
+     - 点击 / 输入 / 按键 / 滚动：\`POST ${baseUrl}/api/v1/browser/act\` Body: \`{"target": "default" | "feishu", "action": "click" | "fill" | "press" | "scroll", "targetId": "b1", "text": "输入内容"}\`
+     - 飞书后台零泄密辅助操作（由本机内核在后台代填 JSON 与托管连接，你全程零接触任何密钥）：\`POST ${baseUrl}/api/v1/browser/feishu-assist\` Body: \`{"op": "status" | "fill_permission_json" | "sync_local_bridge"}\`
 
 ## 5. 标准闭环流程（省预算 + 递进式完善）
 1. **先定项目归属**：收到需求后，先查 \`GET /api/v1/projects\` 和 \`GET /api/v1/clis\`，调 \`propose-project\` 确认项目归属；
@@ -408,6 +409,8 @@ export class ControlServer {
     const home = os.homedir();
     const projDirs = this.store.getState().projects.map((p) => p.repoPath).filter(Boolean);
     const defaults = [
+      path.join(home, '.musedeck-inbox'),
+      path.join(home, '.musedeck-research'),
       path.join(home, 'Desktop'),
       path.join(home, 'Documents'),
       path.join(home, 'Downloads')
@@ -1419,7 +1422,7 @@ export class ControlServer {
       return;
     }
 
-    // Local-IP Controlled Browser API (prevents cloud datacenter IP blocks & reuses local login cookies)
+    // Local-IP Controlled Browser API (with automatic local privacy redaction shield)
     if (this.localBrowser && pathname.startsWith('/api/v1/browser/')) {
       try {
         if (req.method === 'GET' && pathname === '/api/v1/browser/status') {
@@ -1427,7 +1430,8 @@ export class ControlServer {
           return;
         }
         if (req.method === 'GET' && pathname === '/api/v1/browser/snapshot') {
-          const snap = await this.localBrowser.snapshot();
+          const target = parsed.searchParams.get('target') === 'feishu' ? 'feishu' : 'default';
+          const snap = await this.localBrowser.snapshot(target);
           this.sendJson(res, 200, snap);
           return;
         }
@@ -1438,9 +1442,11 @@ export class ControlServer {
             this.sendJson(res, 400, { error: 'Missing required field: url' });
             return;
           }
+          const target = body.target === 'feishu' ? 'feishu' : undefined;
           const snap = await this.localBrowser.openUrl(
             url,
-            typeof body.waitMs === 'number' ? body.waitMs : 1800
+            typeof body.waitMs === 'number' ? body.waitMs : 1800,
+            target
           );
           this.sendJson(res, 200, { ok: true, snapshot: snap });
           return;
@@ -1454,6 +1460,7 @@ export class ControlServer {
           }
           const result = await this.localBrowser.act({
             action: actType,
+            target: body.target === 'feishu' ? 'feishu' : undefined,
             targetId: body.targetId ? String(body.targetId) : undefined,
             text: body.text !== undefined ? String(body.text) : undefined,
             key: body.key ? String(body.key) : undefined,
@@ -1462,6 +1469,23 @@ export class ControlServer {
                 ? body.direction
                 : 'down'
           });
+          this.sendJson(res, 200, result);
+          return;
+        }
+        if (req.method === 'POST' && pathname === '/api/v1/browser/feishu-assist') {
+          const body = await this.readBody(req);
+          const opRaw = String(body.op || 'status').trim();
+          if (
+            opRaw !== 'status' &&
+            opRaw !== 'fill_permission_json' &&
+            opRaw !== 'sync_local_bridge'
+          ) {
+            this.sendJson(res, 400, {
+              error: 'Invalid op; expected status, fill_permission_json, or sync_local_bridge'
+            });
+            return;
+          }
+          const result = await this.localBrowser.feishuAssist(opRaw);
           this.sendJson(res, 200, result);
           return;
         }

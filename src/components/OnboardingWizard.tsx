@@ -104,7 +104,7 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
   const [copiedKey, setCopiedKey] = useState('');
   const [connecting, setConnecting] = useState(false);
 
-  // Workflow & decision policy states (Step 3)
+  // Step 2: Workflow & decision policy states
   const [permLevel, setPermLevel] = useState<PermissionLevel>(state.permissionLevel || 'auto');
   const [planMode, setPlanMode] = useState<PlanApprovalMode>(
     state.workflow?.planApprovalMode || 'adaptive'
@@ -130,8 +130,9 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
     state.workflow?.quietHoursEnabled !== false
   );
 
-  // Step 2 Feishu Auto-Pilot & Step 5 Muse pre-flight states
+  // Step 4 Muse pre-flight & Step 5 Privacy-Shielded Muse Feishu Co-Pilot states
   const [botNameDraft, setBotNameDraft] = useState('MuseDeck');
+  const [runningMuseCoPilot, setRunningMuseCoPilot] = useState(false);
   const [runningFeishuAuto, setRunningFeishuAuto] = useState(false);
   const [feishuAutoTip, setFeishuAutoTip] = useState('');
   const [feishuStepReport, setFeishuStepReport] = useState<FeishuAutoStepReport[]>([]);
@@ -141,6 +142,15 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
   const [permTip, setPermTip] = useState('');
   const [syncingAvatar, setSyncingAvatar] = useState(false);
   const [avatarTip, setAvatarTip] = useState('');
+
+  useEffect(() => {
+    if (state.feishu.appId && state.feishu.appId !== appId) {
+      setAppId(state.feishu.appId);
+    }
+    if (state.feishu.appSecret && state.feishu.appSecret !== appSecret) {
+      setAppSecret(state.feishu.appSecret);
+    }
+  }, [state.feishu.appId, state.feishu.appSecret]);
 
   useEffect(() => {
     void window.fmc.getMuseExtensionStatus().then(setExtStatus);
@@ -203,11 +213,26 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
     }
   };
 
+  const handleRunMuseCoPilot = async () => {
+    if (runningMuseCoPilot || runningFeishuAuto) return;
+    setRunningMuseCoPilot(true);
+    setFeishuStepReport([]);
+    setFeishuAutoTip('正在检查左侧飞书登录态并开启本地隐私脱敏护盾唤醒 Muse...');
+    try {
+      const res = await window.fmc.runMuseFeishuCoPilot({
+        botName: botNameDraft
+      });
+      setFeishuAutoTip(res.message);
+    } finally {
+      setRunningMuseCoPilot(false);
+    }
+  };
+
   const handleRunFeishuAutoPilot = async () => {
-    if (runningFeishuAuto) return;
+    if (runningFeishuAuto || runningMuseCoPilot) return;
     setRunningFeishuAuto(true);
     setFeishuStepReport([]);
-    setFeishuAutoTip('正在检查左侧飞书开放平台登录态并启动分步可视自动代配...');
+    setFeishuAutoTip('正在检查左侧飞书开放平台登录态并执行本地脚本代配...');
     try {
       const res = await window.fmc.runFeishuAutoPilot({
         botName: botNameDraft,
@@ -249,7 +274,7 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
     if (st.url) setTunnelUrl(st.url);
   };
 
-  const handleSaveStep3AndNext = async () => {
+  const handleSaveStep2AndNext = async () => {
     await window.fmc.setPermissionLevel(permLevel);
     await window.fmc.updateWorkflowConfig({
       planApprovalMode: planMode,
@@ -261,7 +286,7 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
       proactivePushEnabled,
       quietHoursEnabled
     });
-    goStep(4);
+    goStep(3);
   };
 
   const handleTriggerPreflight = async () => {
@@ -295,10 +320,10 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
 
   const steps = [
     { num: 1 as const, label: '本地 CLI', done: enabledCount > 0 },
-    { num: 2 as const, label: '飞书机器人', done: isFeishuVerified },
-    { num: 3 as const, label: '决策与预算', done: step > 3 },
-    { num: 4 as const, label: '公网隧道', done: isTunnelReady },
-    { num: 5 as const, label: 'Muse 权限预检', done: isMuseVerified }
+    { num: 2 as const, label: '决策与预算', done: step > 2 },
+    { num: 3 as const, label: '公网隧道', done: isTunnelReady },
+    { num: 4 as const, label: '连通 Muse', done: isMuseVerified },
+    { num: 5 as const, label: '飞书机器人', done: isFeishuVerified }
   ];
 
   return (
@@ -370,7 +395,7 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
                     第 1 步：选择并配置本机 AI 编程 CLI（沙箱隔离，不改本机原配置）
                   </h2>
                   <p className="mt-1 text-[12px] text-[#71717a]">
-                    勾选你要启用的 CLI，点击卡片上的「配置」可扫描订阅/API 可用模型（支持 Codex 订阅实时拉取、Antigravity 实时扫描）、设定职能权重与计费类型。
+                    勾选你要启用的 CLI（启用 2 个以上可在某一个额度耗尽时由 Muse 自动无缝接力！），点击卡片上的「配置」可扫描可用模型。
                   </p>
                 </div>
                 <CliManagerView
@@ -391,254 +416,21 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
                 onClick={() => goStep(2)}
                 className="inline-flex items-center gap-1.5 rounded-xl bg-[#18181b] px-4 py-2 text-[12.5px] font-medium text-white transition-colors hover:bg-[#27272a]"
               >
-                下一步：配置飞书机器人
+                下一步：决策与预算策略
                 <ChevronRight className="h-3.5 w-3.5" />
               </button>
             </div>
           </div>
         )}
 
-        {/* ================= STEP 2: FEISHU BOT ================= */}
+        {/* ================= STEP 2: WORKFLOW, ROUTING & 100% PRIORITY WEIGHTS ================= */}
         {step === 2 && (
-          <div className="grid h-full grid-cols-12">
-            <div className="col-span-7 h-full border-r border-[#eaecef]">
-              <EmbeddedBrowserSlot
-                target="feishu"
-                initialUrl="https://open.feishu.cn/app"
-                visible={step === 2}
-                presets={[
-                  { label: '飞书开放平台', url: 'https://open.feishu.cn/app' },
-                  { label: '飞书网页版', url: 'https://www.feishu.cn/messenger/' }
-                ]}
-              />
-            </div>
-
-            <div className="col-span-5 flex h-full flex-col overflow-hidden bg-[#fafafa]">
-              <div className="flex-1 space-y-4 overflow-y-auto p-5">
-                {/* One-Click Local Feishu Auto-Pilot Card */}
-                <section className="rounded-2xl border border-[#18181b] bg-white p-4 shadow-2xs">
-                  <div className="flex items-center justify-between gap-2">
-                    <h2 className="flex items-center gap-1.5 text-[13px] font-semibold text-[#111827]">
-                      <Sparkles className="h-3.5 w-3.5 text-amber-500" />
-                      扫码后一键本地自动代配（走本机 IP · 0 对话污染）
-                    </h2>
-                  </div>
-                  <p className="mt-1 text-[11px] leading-relaxed text-[#52525b]">
-                    先在左侧用手机飞书<strong>扫码登录开放平台</strong>（确认右上角企业与手机飞书一致），填好下方机器人名称后点按钮，自动帮你建应用、开机器人、导 7 项权限、抓凭证连长连接并打开版本发布页：
-                  </p>
-                  <div className="mt-2.5 flex gap-2">
-                    <input
-                      value={botNameDraft}
-                      onChange={(e) => setBotNameDraft(e.target.value)}
-                      placeholder="新机器人名称（如 MuseDeck）"
-                      className="min-w-0 flex-1 rounded-xl border border-[#e4e4e7] bg-[#fafafa] px-3 py-1.5 text-[12px] text-[#111827] outline-none focus:border-[#18181b] focus:bg-white"
-                    />
-                    <button
-                      type="button"
-                      disabled={runningFeishuAuto}
-                      onClick={() => void handleRunFeishuAutoPilot()}
-                      className="inline-flex shrink-0 items-center gap-1.5 rounded-xl bg-[#18181b] px-3.5 py-1.5 text-[12px] font-medium text-white transition-colors hover:bg-[#27272a] disabled:opacity-50"
-                    >
-                      {runningFeishuAuto ? (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      ) : (
-                        <Sparkles className="h-3.5 w-3.5" />
-                      )}
-                      {runningFeishuAuto ? '自动配置中...' : '⚡ 一键自动代配'}
-                    </button>
-                  </div>
-                  {feishuAutoTip && (
-                    <div className="mt-2 rounded-xl border border-[#eaecef] bg-[#fafafa] px-3 py-2 text-[11px] leading-relaxed text-[#3f3f46]">
-                      <div className="font-medium text-[#111827]">{feishuAutoTip}</div>
-                      {feishuStepReport.length > 0 && (
-                        <ul className="mt-2 space-y-1.5 border-t border-[#eaecef] pt-2">
-                          {feishuStepReport.map((item, idx) => (
-                            <li key={idx} className="flex items-start gap-1.5">
-                              <span className="mt-0.5 shrink-0">
-                                {item.status === 'ok' ? '✅' : item.status === 'warn' ? '⚠️' : '👉'}
-                              </span>
-                              <div>
-                                <span className="font-semibold text-[#111827]">{item.step}：</span>
-                                <span className="text-[#52525b]">{item.detail}</span>
-                              </div>
-                            </li>
-                          ))}
-                        </ul>
-                      )}
-                    </div>
-                  )}
-                </section>
-
-                <section className="rounded-2xl border border-[#eaecef] bg-white p-4">
-                  <div className="mb-3 flex items-center justify-between">
-                    <h2 className="text-[13.5px] font-semibold text-[#111827]">飞书机器人凭证</h2>
-                    <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-[#52525b]">
-                      <span
-                        className={`h-1.5 w-1.5 rounded-full ${
-                          hasUnsavedFeishuDraft
-                            ? 'bg-amber-500'
-                            : isFeishuVerified
-                              ? 'bg-emerald-500'
-                              : isFeishuConnected
-                                ? 'animate-pulse bg-amber-500'
-                                : 'bg-[#d4d4d8]'
-                        }`}
-                      />
-                      {hasUnsavedFeishuDraft
-                        ? '新凭证待连接'
-                        : isFeishuVerified
-                          ? '当前机器人已验通'
-                          : isFeishuConnected
-                            ? '长连接在线（待发消息验通）'
-                            : '未连接'}
-                    </span>
-                  </div>
-
-                  <div className="space-y-2.5 text-[12.5px]">
-                    <div className="grid grid-cols-2 gap-2">
-                      <div>
-                        <label className="mb-1 block text-[11.5px] font-medium text-[#52525b]">
-                          App ID
-                        </label>
-                        <input
-                          value={appId}
-                          onChange={(e) => setAppId(e.target.value)}
-                          placeholder="cli_a1b2c3..."
-                          className="w-full rounded-xl border border-[#e4e4e7] bg-white px-3 py-1.5 text-[12px] text-[#111827] outline-none focus:border-[#18181b]"
-                        />
-                      </div>
-                      <div>
-                        <label className="mb-1 block text-[11.5px] font-medium text-[#52525b]">
-                          App Secret
-                        </label>
-                        <input
-                          type="password"
-                          value={appSecret}
-                          onChange={(e) => setAppSecret(e.target.value)}
-                          placeholder="粘贴 App Secret"
-                          className="w-full rounded-xl border border-[#e4e4e7] bg-white px-3 py-1.5 text-[12px] text-[#111827] outline-none focus:border-[#18181b]"
-                        />
-                      </div>
-                    </div>
-
-                    <div className="flex flex-wrap gap-2">
-                      <button
-                        onClick={() => void handleConnectFeishu()}
-                        disabled={!appId.trim() || !appSecret.trim() || connecting}
-                        className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-xl bg-[#18181b] px-4 py-2 text-[12.5px] font-medium text-white transition-colors hover:bg-[#27272a] disabled:opacity-40"
-                      >
-                        {connecting ? (
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        ) : (
-                          <Radio className="h-3.5 w-3.5" />
-                        )}
-                        {hasUnsavedFeishuDraft
-                          ? '连接到此新机器人（自动清空旧验证）'
-                          : '连接飞书长连接（无需公网服务器）'}
-                      </button>
-
-                      {feishuBotAppLink && (
-                        <button
-                          type="button"
-                          onClick={() => void window.fmc.openExternal(feishuBotAppLink)}
-                          className="inline-flex items-center gap-1 rounded-xl border border-[#e4e4e7] bg-white px-3 py-2 text-[12px] font-medium text-[#111827] transition-colors hover:bg-[#f4f4f5]"
-                          title="发布应用版本后，点此可免搜索直接在飞书客户端打开该机器人的聊天框"
-                        >
-                          <ExternalLink className="h-3.5 w-3.5" />
-                          唤起机器人对话
-                        </button>
-                      )}
-                    </div>
-
-                    <div
-                      className={`rounded-xl border px-3 py-2 text-[11.5px] ${
-                        hasUnsavedFeishuDraft
-                          ? 'border-amber-200 bg-amber-50/70 text-amber-900'
-                          : isFeishuVerified
-                            ? 'border-emerald-200 bg-emerald-50/70 text-emerald-900'
-                            : isFeishuConnected
-                              ? 'border-amber-200 bg-amber-50/70 text-amber-900'
-                              : 'border-[#eaecef] bg-[#fafafa] text-[#71717a]'
-                      }`}
-                    >
-                      {hasUnsavedFeishuDraft ? (
-                        <span>
-                          检测到你修改了应用凭证（尚未连接）。请点击上方黑色按钮连接到新机器人，之前旧机器人的连接与收信记录不会混用。
-                        </span>
-                      ) : isFeishuVerified ? (
-                        <div className="flex items-center justify-between gap-2">
-                          <span>
-                            当前机器人（<code className="font-mono">{trimmedAppId}</code>）已双向验通！收到测试消息：「
-                            {state.feishu.lastPingMessage || '你好'}」
-                          </span>
-                          <button
-                            type="button"
-                            onClick={() => void window.fmc.resetFeishuVerification()}
-                            className="shrink-0 rounded-md border border-emerald-300 bg-white px-2 py-0.5 text-[11px] font-medium text-emerald-800 hover:bg-emerald-100"
-                          >
-                            重新验证
-                          </button>
-                        </div>
-                      ) : isFeishuConnected ? (
-                        <span>
-                          当前机器人（<code className="font-mono">{trimmedAppId}</code>）长连接已在线：请完成下方第 5、6 步发布版本后，点「唤起机器人对话」发送一句「你好」完成验通。
-                        </span>
-                      ) : (
-                        <span>
-                          {feishuStatus.state === 'error'
-                            ? feishuStatus.message
-                            : '请参照下方 6 步详细指引创建应用并填入 App ID / Secret'}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                </section>
-
-                <FeishuSetupGuide
-                  feishuConnected={isFeishuConnected}
-                  feishuVerified={isFeishuVerified}
-                  appId={appId}
-                  appSecret={appSecret}
-                  onNavigateFeishuUrl={(url) => void window.fmc.navigateEmbeddedView('feishu', url)}
-                />
-              </div>
-
-              <div className="flex shrink-0 items-center justify-between border-t border-[#eaecef] bg-white px-5 py-3">
-                <button
-                  onClick={() => goStep(1)}
-                  className="inline-flex items-center gap-1.5 rounded-xl border border-[#e4e4e7] bg-white px-3.5 py-2 text-[12.5px] font-medium text-[#52525b] hover:bg-[#f4f4f5]"
-                >
-                  <ArrowLeft className="h-3.5 w-3.5" />
-                  上一步
-                </button>
-                <div className="flex items-center gap-3">
-                  <button
-                    onClick={() => goStep(3)}
-                    className="text-[12px] text-[#8a8f98] hover:text-[#111827]"
-                  >
-                    暂跳过飞书
-                  </button>
-                  <button
-                    onClick={() => goStep(3)}
-                    className="inline-flex items-center gap-1.5 rounded-xl bg-[#18181b] px-4 py-2 text-[12.5px] font-medium text-white hover:bg-[#27272a]"
-                  >
-                    下一步：决策与预算策略
-                    <ChevronRight className="h-3.5 w-3.5" />
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* ================= STEP 3: WORKFLOW, ROUTING & 100% PRIORITY WEIGHTS ================= */}
-        {step === 3 && (
           <div className="flex h-full flex-col bg-[#fafafa]">
             <div className="min-h-0 flex-1 overflow-y-auto px-6 py-6">
               <div className="mx-auto max-w-[820px] space-y-4 text-[12.5px]">
                 <div>
                   <h2 className="text-[15px] font-semibold text-[#111827]">
-                    第 3 步：设定 Muse 智能决策、审批与预算护栏（进入软件后可随时在「软件设置」修改）
+                    第 2 步：设定 Muse 智能决策、审批与预算护栏（进入软件后可随时在「软件设置」修改）
                   </h2>
                   <p className="mt-0.5 text-[12px] text-[#71717a]">
                     决定 Muse 如何为你确认方案、如何为每个子任务挑选最划算的模型，以及单次任务的预算上限。
@@ -694,7 +486,7 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
                     2. 项目模型与分工决策 + 100% 优先级权重
                   </div>
                   <p className="mt-0.5 text-[11.5px] text-[#71717a]">
-                    支持读取所有已开 CLI 的全量模型池与每日权威榜单，同一个 CLI 下可用不同模型处理不同子任务，并在审阅不达标时递进升档省预算（不改动你的默认配置）
+                    支持读取所有已开 CLI 的全量模型池与每日权威榜单，同一个 CLI 下可用不同模型处理不同子任务，且当某个 CLI 额度触顶时按此权重自动无缝换工具接力
                   </p>
                   <div className="mt-3 grid grid-cols-1 gap-2.5 sm:grid-cols-3">
                     {(
@@ -930,14 +722,14 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
 
             <div className="flex shrink-0 items-center justify-between border-t border-[#eaecef] bg-white px-6 py-3">
               <button
-                onClick={() => goStep(2)}
+                onClick={() => goStep(1)}
                 className="inline-flex items-center gap-1.5 rounded-xl border border-[#e4e4e7] bg-white px-3.5 py-2 text-[12.5px] font-medium text-[#52525b] hover:bg-[#f4f4f5]"
               >
                 <ArrowLeft className="h-3.5 w-3.5" />
                 上一步
               </button>
               <button
-                onClick={() => void handleSaveStep3AndNext()}
+                onClick={() => void handleSaveStep2AndNext()}
                 className="inline-flex items-center gap-1.5 rounded-xl bg-[#18181b] px-4 py-2 text-[12.5px] font-medium text-white hover:bg-[#27272a]"
               >
                 保存策略，下一步：开启公网隧道
@@ -947,14 +739,14 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
           </div>
         )}
 
-        {/* ================= STEP 4: HTTPS 443 TUNNEL WITH DETAILED TAILSCALE GUIDE ================= */}
-        {step === 4 && (
+        {/* ================= STEP 3: HTTPS 443 TUNNEL ================= */}
+        {step === 3 && (
           <div className="flex h-full flex-col bg-[#fafafa]">
             <div className="min-h-0 flex-1 overflow-y-auto px-6 py-6">
               <div className="mx-auto max-w-[740px] space-y-4 text-[12.5px]">
                 <div>
                   <h2 className="text-[15px] font-semibold text-[#111827]">
-                    第 4 步：开启 443 HTTPS 公网穿透（让云端 Meta Muse 能访问你的本机接口）
+                    第 3 步：开启 443 HTTPS 公网穿透（让云端 Meta Muse 能访问你的本机接口）
                   </h2>
                   <p className="mt-0.5 text-[12px] text-[#71717a]">
                     推荐使用内置的 <strong>Tailscale Funnel</strong>：无需安装客户端、无需云服务器，完成一次免费网页授权即可获得<strong>永久不变的 .ts.net 域名</strong>。
@@ -1030,11 +822,10 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
                     )}
                   </div>
 
-                  {/* Active Auth URL Banner */}
                   {tunnelStatus.authUrl && tunnelStatus.state !== 'running' && (
                     <div className="mt-3.5 rounded-xl border border-amber-200 bg-amber-50/80 p-3 text-[12px] text-amber-950">
                       <div className="flex items-center justify-between gap-2 font-semibold">
-                        <span>浏览器已弹出 Tailscale 授权页（若未弹出请点击右侧按钮打开）：</span>
+                        <span>已弹出 Tailscale 自动授权小窗（若未看到请点击右侧打开）：</span>
                         <button
                           type="button"
                           onClick={() => void window.fmc.openExternal(tunnelStatus.authUrl!)}
@@ -1077,23 +868,21 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
                   </div>
                 </section>
 
-                {/* Detailed Step-by-Step Tailscale Webpage Guide */}
                 <section className="rounded-2xl border border-[#eaecef] bg-white p-5">
                   <h3 className="text-[13px] font-semibold text-[#111827]">
-                    Tailscale 自动授权说明（已内置本地自动点击助手！）
+                    Tailscale 自动授权说明（内置本地自动点击助手）
                   </h3>
                   <ol className="mt-2.5 list-decimal space-y-2 pl-4 text-[12px] leading-relaxed text-[#52525b]">
                     <li>
-                      <strong>自动弹出本地授权窗口（走本机 IP）：</strong>点击上方启动按钮后，MuseDeck 会弹出专属授权窗口打开{' '}
-                      <code className="rounded bg-[#f4f4f5] px-1">login.tailscale.com</code>。你只需使用{' '}
-                      <strong>Google / GitHub / Microsoft</strong> 登录一次，窗口内置助手会<strong>自动为你点击「Connect」与「Enable Funnel」</strong>！
+                      <strong>自动弹出本地授权窗口：</strong>点击上方启动按钮后，使用{' '}
+                      <strong>Google / GitHub / Microsoft</strong> 登录一次，内置助手会<strong>自动点击「Connect」与「Enable Funnel」</strong>。
                     </li>
                     <li>
-                      <strong>首次若提示需先开 HTTPS：</strong>若页面提示需启用 HTTPS 证书，进入顶部 <strong>DNS</strong> 标签页，滑到底部勾选开启{' '}
+                      <strong>首次若提示需先开 HTTPS：</strong>进入顶部 <strong>DNS</strong> 标签页，滑到底部开启{' '}
                       <strong>MagicDNS</strong> 与 <strong>Enable HTTPS</strong> 即可。
                     </li>
                     <li>
-                      <strong>自动回填并关闭窗口：</strong>授权通过后约 3~8 秒自动获取专属 <code className="rounded bg-[#f4f4f5] px-1">.ts.net</code> 永久域名并自动关闭授权小窗！
+                      <strong>自动回填并关闭窗口：</strong>授权通过后约 3~8 秒自动获取专属 <code className="rounded bg-[#f4f4f5] px-1">.ts.net</code> 永久域名并自动关闭小窗。
                     </li>
                   </ol>
                 </section>
@@ -1102,31 +891,31 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
 
             <div className="flex shrink-0 items-center justify-between border-t border-[#eaecef] bg-white px-6 py-3">
               <button
-                onClick={() => goStep(3)}
+                onClick={() => goStep(2)}
                 className="inline-flex items-center gap-1.5 rounded-xl border border-[#e4e4e7] bg-white px-3.5 py-2 text-[12.5px] font-medium text-[#52525b] hover:bg-[#f4f4f5]"
               >
                 <ArrowLeft className="h-3.5 w-3.5" />
                 上一步
               </button>
               <button
-                onClick={() => goStep(5)}
+                onClick={() => goStep(4)}
                 className="inline-flex items-center gap-1.5 rounded-xl bg-[#18181b] px-4 py-2 text-[12.5px] font-medium text-white hover:bg-[#27272a]"
               >
-                下一步：登录 Muse 并预授权站点权限
+                下一步：登录 Muse 并授权站点权限
                 <ChevronRight className="h-3.5 w-3.5" />
               </button>
             </div>
           </div>
         )}
 
-        {/* ================= STEP 5: MUSE LOGIN & SITE PERMISSION PRE-FLIGHT ================= */}
-        {step === 5 && (
+        {/* ================= STEP 4: MUSE LOGIN & SITE PERMISSION PRE-FLIGHT ================= */}
+        {step === 4 && (
           <div className="grid h-full grid-cols-12">
             <div className="col-span-7 h-full border-r border-[#eaecef]">
               <EmbeddedBrowserSlot
                 target="muse"
                 initialUrl={museUrl}
-                visible={step === 5}
+                visible={step === 4}
                 presets={[
                   { label: 'Meta Muse', url: 'https://muse.ai' },
                   { label: '飞书网页版', url: 'https://www.feishu.cn/messenger/' }
@@ -1136,7 +925,6 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
 
             <div className="col-span-5 flex h-full flex-col overflow-hidden bg-[#fafafa]">
               <div className="flex-1 space-y-4 overflow-y-auto p-5 text-[12.5px]">
-                {/* Card 1: Muse Login + VPN Tip + Avatar Sync */}
                 <section className="rounded-2xl border border-[#eaecef] bg-white p-4">
                   <div className="flex items-center justify-between">
                     <h2 className="text-[13.5px] font-semibold text-[#111827]">
@@ -1163,7 +951,7 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
                   <div className="mt-2.5 flex items-start gap-1.5 rounded-xl border border-amber-200/80 bg-amber-50/70 px-3 py-2 text-[11px] leading-relaxed text-amber-900">
                     <span className="shrink-0">🌐</span>
                     <span>
-                      <strong>网络提示：</strong>Meta Muse（muse.ai）目前在国内直连网络下无法打开。若左侧页面空白或转圈，请先开启 VPN / 代理（推荐开启系统代理或 TUN 模式）再点刷新。
+                      <strong>网络提示：</strong>Meta Muse（muse.ai）在国内直连网络下无法打开。若左侧空白或转圈，请开启系统代理或 TUN 模式后再点刷新。
                     </span>
                   </div>
                   <div className="mt-2.5 flex gap-2">
@@ -1185,7 +973,6 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
                   {avatarTip && <p className="mt-1.5 text-[11px] text-emerald-700">{avatarTip}</p>}
                 </section>
 
-                {/* Card 2: Pre-Flight Protocol Sync + Site Access "Always Allow" Handshake! */}
                 <section className="rounded-2xl border border-[#18181b] bg-white p-4 shadow-2xs">
                   <div className="flex items-center justify-between gap-2">
                     <h2 className="flex items-center gap-1.5 text-[13.5px] font-semibold text-[#111827]">
@@ -1199,14 +986,14 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
                     )}
                   </div>
                   <p className="mt-1 text-[11.5px] leading-relaxed text-[#52525b]">
-                    为了防止正式派发飞书任务时被 Muse 的「外部站点访问权限确认框」打断导致指令冲突，请在这里提前完成一次性授权握手：
+                    先在这里完成一次性站点授权握手，下一步即可直接让上岗的 Muse 帮你智能接管配置飞书机器人！
                   </p>
 
                   <ol className="mt-2.5 list-decimal space-y-1.5 pl-4 text-[11.5px] text-[#3f3f46]">
-                    <li>先确保左侧已登录进入与 Muse 的聊天对话框；</li>
+                    <li>确保左侧已登录进入与 Muse 的聊天对话框；</li>
                     <li>点击下方黑色按钮「<strong>发送协议并触发站点权限预检</strong>」；</li>
                     <li>
-                      观察左侧 Muse 聊天框：当它弹出询问是否允许访问你的 <code className="rounded bg-[#f4f4f5] px-1">.ts.net</code> 域名时，点击 <strong>「总是允许此站点」</strong>（也可点下方辅助按钮自动帮你点）！
+                      当左侧 Muse 弹出是否允许访问你的 <code className="rounded bg-[#f4f4f5] px-1">.ts.net</code> 域名时，点击 <strong>「总是允许此站点」</strong>（或点下方辅助按钮自动点）！
                     </li>
                   </ol>
 
@@ -1265,7 +1052,7 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
                       <div className="flex items-center gap-1.5 font-medium">
                         <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600" />
                         <span>
-                          双向握手验证成功！本机已收到 Muse 发来的真实 API 请求，「总是允许此站点」已永久生效，现在进入工作台即可顺畅使用！
+                          双向握手验证成功！Muse 已正式打通本机接口，现在点「下一步」即可让 Muse 接管配置你的飞书机器人！
                         </span>
                       </div>
                     ) : (
@@ -1276,7 +1063,6 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
                   </div>
                 </section>
 
-                {/* Card 3: Official "Muse from Meta" Local Chrome Extension Co-Op + Built-in Local Browser */}
                 <section className="rounded-2xl border border-[#eaecef] bg-white p-4">
                   <div className="flex items-center justify-between gap-2">
                     <h2 className="text-[13px] font-semibold text-[#111827]">
@@ -1296,8 +1082,8 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
                   </div>
                   <p className="mt-1 text-[11px] leading-relaxed text-[#52525b]">
                     {extStatus?.installed
-                      ? `已检测到你本机 ${extStatus.browser === 'edge' ? 'Edge' : 'Chrome'} 安装了官方「Muse from Meta」插件！唤醒后 Muse 可直接用你本机浏览器与已登录账号操作网页；同时 MuseDeck 也内置了受控本地浏览器 API 双保险。`
-                      : 'MuseDeck 已内置本地 IP 浏览器接口供 Muse 调用；你也可以在本机 Chrome 安装官方「Muse from Meta」扩展，让 Muse 直接操作你的日常 Chrome 标签组。'}
+                      ? `已检测到你本机 ${extStatus.browser === 'edge' ? 'Edge' : 'Chrome'} 安装了官方「Muse from Meta」插件！同时 MuseDeck 已内置隐私脱敏受控浏览器双保险。`
+                      : 'MuseDeck 已内置本地 IP 隐私脱敏受控浏览器供 Muse 调用；你也可在本机 Chrome 安装官方「Muse from Meta」扩展。'}
                   </p>
                   <div className="mt-2.5 flex flex-wrap gap-2">
                     <button
@@ -1326,19 +1112,267 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
 
               <div className="flex shrink-0 items-center justify-between border-t border-[#eaecef] bg-white px-5 py-3">
                 <button
-                  onClick={() => goStep(4)}
+                  onClick={() => goStep(3)}
                   className="inline-flex items-center gap-1.5 rounded-xl border border-[#e4e4e7] bg-white px-3.5 py-2 text-[12.5px] font-medium text-[#52525b] hover:bg-[#f4f4f5]"
                 >
                   <ArrowLeft className="h-3.5 w-3.5" />
                   上一步
                 </button>
                 <button
-                  onClick={() => void onComplete()}
-                  className="inline-flex items-center gap-1.5 rounded-xl bg-[#18181b] px-5 py-2 text-[12.5px] font-medium text-white hover:bg-[#27272a]"
+                  onClick={() => goStep(5)}
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-[#18181b] px-4 py-2 text-[12.5px] font-medium text-white hover:bg-[#27272a]"
                 >
-                  完成配置，进入 MuseDeck
+                  下一步：配置飞书机器人（支持 Muse 接管）
                   <ChevronRight className="h-3.5 w-3.5" />
                 </button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ================= STEP 5: FEISHU BOT (PRIVACY-SHIELDED MUSE CO-PILOT) ================= */}
+        {step === 5 && (
+          <div className="grid h-full grid-cols-12">
+            <div className="col-span-7 h-full border-r border-[#eaecef]">
+              <EmbeddedBrowserSlot
+                target="feishu"
+                initialUrl="https://open.feishu.cn/app"
+                visible={step === 5}
+                presets={[
+                  { label: '飞书开放平台', url: 'https://open.feishu.cn/app' },
+                  { label: '飞书网页版', url: 'https://www.feishu.cn/messenger/' }
+                ]}
+              />
+            </div>
+
+            <div className="col-span-5 flex h-full flex-col overflow-hidden bg-[#fafafa]">
+              <div className="flex-1 space-y-4 overflow-y-auto p-5">
+                {/* Privacy-Shielded Muse Co-Pilot Card */}
+                <section className="rounded-2xl border border-[#18181b] bg-white p-4 shadow-2xs">
+                  <div className="flex items-center justify-between gap-2">
+                    <h2 className="flex items-center gap-1.5 text-[13px] font-semibold text-[#111827]">
+                      <Sparkles className="h-3.5 w-3.5 text-amber-500" />
+                      扫码后让 Muse 智能接管配置（本地隐私脱敏护盾）
+                    </h2>
+                    <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold text-emerald-800">
+                      Muse 0 接触密钥
+                    </span>
+                  </div>
+                  <p className="mt-1 text-[11px] leading-relaxed text-[#52525b]">
+                    先在左侧用手机飞书<strong>扫码登录开放平台</strong>（确认右上角企业与手机飞书一致），然后点击「<strong>🤖 让 Muse 接管配置</strong>」：Muse 会智能识别左侧界面按钮完成建应用、开机器人、导权限与配事件；所有 App Secret 密钥均在本地自动屏蔽并由本机底层暗中托管连线，<strong>绝不发送给 Muse</strong>！
+                  </p>
+                  <div className="mt-2.5 flex flex-wrap gap-2">
+                    <input
+                      value={botNameDraft}
+                      onChange={(e) => setBotNameDraft(e.target.value)}
+                      placeholder="新机器人名称（如 MuseDeck）"
+                      className="min-w-[140px] flex-1 rounded-xl border border-[#e4e4e7] bg-[#fafafa] px-3 py-1.5 text-[12px] text-[#111827] outline-none focus:border-[#18181b] focus:bg-white"
+                    />
+                    <button
+                      type="button"
+                      disabled={runningMuseCoPilot || runningFeishuAuto}
+                      onClick={() => void handleRunMuseCoPilot()}
+                      className="inline-flex shrink-0 items-center gap-1.5 rounded-xl bg-[#18181b] px-3.5 py-1.5 text-[12px] font-medium text-white transition-colors hover:bg-[#27272a] disabled:opacity-50"
+                    >
+                      {runningMuseCoPilot ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <Sparkles className="h-3.5 w-3.5 text-amber-400" />
+                      )}
+                      {runningMuseCoPilot ? '正在唤醒 Muse...' : '🤖 让 Muse 接管配置'}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={runningFeishuAuto || runningMuseCoPilot}
+                      onClick={() => void handleRunFeishuAutoPilot()}
+                      className="inline-flex shrink-0 items-center gap-1 rounded-xl border border-[#e4e4e7] bg-white px-2.5 py-1.5 text-[11.5px] font-medium text-[#52525b] hover:bg-[#f4f4f5] hover:text-[#111827] disabled:opacity-50"
+                      title="若尚未打通 Muse，也可使用内置本地脚本代配"
+                    >
+                      {runningFeishuAuto ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+                      本地脚本代配
+                    </button>
+                  </div>
+                  {feishuAutoTip && (
+                    <div className="mt-2 rounded-xl border border-[#eaecef] bg-[#fafafa] px-3 py-2 text-[11px] leading-relaxed text-[#3f3f46]">
+                      <div className="font-medium text-[#111827]">{feishuAutoTip}</div>
+                      {feishuStepReport.length > 0 && (
+                        <ul className="mt-2 space-y-1.5 border-t border-[#eaecef] pt-2">
+                          {feishuStepReport.map((item, idx) => (
+                            <li key={idx} className="flex items-start gap-1.5">
+                              <span className="mt-0.5 shrink-0">
+                                {item.status === 'ok' ? '✅' : item.status === 'warn' ? '⚠️' : '👉'}
+                              </span>
+                              <div>
+                                <span className="font-semibold text-[#111827]">{item.step}：</span>
+                                <span className="text-[#52525b]">{item.detail}</span>
+                              </div>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
+                  )}
+                </section>
+
+                <section className="rounded-2xl border border-[#eaecef] bg-white p-4">
+                  <div className="mb-3 flex items-center justify-between">
+                    <h2 className="text-[13.5px] font-semibold text-[#111827]">飞书机器人凭证</h2>
+                    <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-[#52525b]">
+                      <span
+                        className={`h-1.5 w-1.5 rounded-full ${
+                          hasUnsavedFeishuDraft
+                            ? 'bg-amber-500'
+                            : isFeishuVerified
+                              ? 'bg-emerald-500'
+                              : isFeishuConnected
+                                ? 'animate-pulse bg-amber-500'
+                                : 'bg-[#d4d4d8]'
+                        }`}
+                      />
+                      {hasUnsavedFeishuDraft
+                        ? '新凭证待连接'
+                        : isFeishuVerified
+                          ? '当前机器人已验通'
+                          : isFeishuConnected
+                            ? '长连接在线（待发消息验通）'
+                            : '未连接'}
+                    </span>
+                  </div>
+
+                  <div className="space-y-2.5 text-[12.5px]">
+                    <div className="grid grid-cols-2 gap-2">
+                      <div>
+                        <label className="mb-1 block text-[11.5px] font-medium text-[#52525b]">
+                          App ID
+                        </label>
+                        <input
+                          value={appId}
+                          onChange={(e) => setAppId(e.target.value)}
+                          placeholder="cli_a1b2c3..."
+                          className="w-full rounded-xl border border-[#e4e4e7] bg-white px-3 py-1.5 text-[12px] text-[#111827] outline-none focus:border-[#18181b]"
+                        />
+                      </div>
+                      <div>
+                        <label className="mb-1 block text-[11.5px] font-medium text-[#52525b]">
+                          App Secret
+                        </label>
+                        <input
+                          type="password"
+                          value={appSecret}
+                          onChange={(e) => setAppSecret(e.target.value)}
+                          placeholder="本地自动托管（也可手动粘贴）"
+                          className="w-full rounded-xl border border-[#e4e4e7] bg-white px-3 py-1.5 text-[12px] text-[#111827] outline-none focus:border-[#18181b]"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        onClick={() => void handleConnectFeishu()}
+                        disabled={!appId.trim() || !appSecret.trim() || connecting}
+                        className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-xl bg-[#18181b] px-4 py-2 text-[12.5px] font-medium text-white transition-colors hover:bg-[#27272a] disabled:opacity-40"
+                      >
+                        {connecting ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <Radio className="h-3.5 w-3.5" />
+                        )}
+                        {hasUnsavedFeishuDraft
+                          ? '连接到此新机器人（自动清空旧验证）'
+                          : '连接飞书长连接（无需公网服务器）'}
+                      </button>
+
+                      {feishuBotAppLink && (
+                        <button
+                          type="button"
+                          onClick={() => void window.fmc.openExternal(feishuBotAppLink)}
+                          className="inline-flex items-center gap-1 rounded-xl border border-[#e4e4e7] bg-white px-3 py-2 text-[12px] font-medium text-[#111827] transition-colors hover:bg-[#f4f4f5]"
+                          title="发布应用版本后，点此可免搜索直接在飞书客户端打开该机器人的聊天框"
+                        >
+                          <ExternalLink className="h-3.5 w-3.5" />
+                          唤起机器人对话
+                        </button>
+                      )}
+                    </div>
+
+                    <div
+                      className={`rounded-xl border px-3 py-2 text-[11.5px] ${
+                        hasUnsavedFeishuDraft
+                          ? 'border-amber-200 bg-amber-50/70 text-amber-900'
+                          : isFeishuVerified
+                            ? 'border-emerald-200 bg-emerald-50/70 text-emerald-900'
+                            : isFeishuConnected
+                              ? 'border-amber-200 bg-amber-50/70 text-amber-900'
+                              : 'border-[#eaecef] bg-[#fafafa] text-[#71717a]'
+                      }`}
+                    >
+                      {hasUnsavedFeishuDraft ? (
+                        <span>
+                          检测到你修改了应用凭证（尚未连接）。请点击上方黑色按钮连接到新机器人。
+                        </span>
+                      ) : isFeishuVerified ? (
+                        <div className="flex items-center justify-between gap-2">
+                          <span>
+                            当前机器人（<code className="font-mono">{trimmedAppId}</code>）已双向验通！收到测试消息：「
+                            {state.feishu.lastPingMessage || '你好'}」
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => void window.fmc.resetFeishuVerification()}
+                            className="shrink-0 rounded-md border border-emerald-300 bg-white px-2 py-0.5 text-[11px] font-medium text-emerald-800 hover:bg-emerald-100"
+                          >
+                            重新验证
+                          </button>
+                        </div>
+                      ) : isFeishuConnected ? (
+                        <span>
+                          当前机器人（<code className="font-mono">{trimmedAppId}</code>）长连接已在线：待左侧发布版本后，点「唤起机器人对话」发一句「你好」（机器人将秒贴 👀 表情并回执）即可完成验通！
+                        </span>
+                      ) : (
+                        <span>
+                          {feishuStatus.state === 'error'
+                            ? feishuStatus.message
+                            : '扫码登录左侧飞书后台后，点击上方「🤖 让 Muse 接管配置」即可自动完成'}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </section>
+
+                <FeishuSetupGuide
+                  feishuConnected={isFeishuConnected}
+                  feishuVerified={isFeishuVerified}
+                  appId={appId}
+                  appSecret={appSecret}
+                  onNavigateFeishuUrl={(url) => void window.fmc.navigateEmbeddedView('feishu', url)}
+                />
+              </div>
+
+              <div className="flex shrink-0 items-center justify-between border-t border-[#eaecef] bg-white px-5 py-3">
+                <button
+                  onClick={() => goStep(4)}
+                  className="inline-flex items-center gap-1.5 rounded-xl border border-[#e4e4e7] bg-white px-3.5 py-2 text-[12.5px] font-medium text-[#52525b] hover:bg-[#f4f4f5]"
+                >
+                  <ArrowLeft className="h-3.5 w-3.5" />
+                  上一步
+                </button>
+                <div className="flex items-center gap-3">
+                  {!isFeishuVerified && (
+                    <button
+                      onClick={() => void onComplete()}
+                      className="text-[12px] text-[#8a8f98] hover:text-[#111827]"
+                    >
+                      稍后再配飞书，先进工作台
+                    </button>
+                  )}
+                  <button
+                    onClick={() => void onComplete()}
+                    className="inline-flex items-center gap-1.5 rounded-xl bg-[#18181b] px-5 py-2 text-[12.5px] font-medium text-white hover:bg-[#27272a]"
+                  >
+                    完成配置，进入 MuseDeck
+                    <ChevronRight className="h-3.5 w-3.5" />
+                  </button>
+                </div>
               </div>
             </div>
           </div>

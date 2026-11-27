@@ -246,10 +246,87 @@ export function isSafePublicBrowserUrl(rawUrl: string): boolean {
   }
 }
 
+export function redactSnapshotPrivacy(snap: LocalBrowserSnapshot): LocalBrowserSnapshot {
+  const isFeishuConsole = /open\.feishu\.cn|open\.larksuite\.com/i.test(snap.url || '');
+  const scrubText = (raw: string): string => {
+    if (!raw) return '';
+    let out = raw
+      // Mask App Secret / Encrypt Key / Verification Token adjacent text
+      .replace(
+        /(App\s*Secret|Encrypt\s*Key|Verification\s*Token)\s*[:：]?\s*[A-Za-z0-9_*•-]{6,64}/gi,
+        '$1: [已由本地隐私护盾自动托管]'
+      )
+      // Mask Bearer tokens
+      .replace(/Bearer\s+[A-Za-z0-9._-]{12,}/gi, 'Bearer [REDACTED]')
+      // Mask standalone 26-48 char alphanumeric secrets (preserve cli_xxxx public App ID)
+      .replace(/\b(?!cli_)[A-Za-z0-9]{26,48}\b/g, (m) =>
+        /[A-Za-z]/.test(m) && /\d/.test(m) ? '[REDACTED_SECRET]' : m
+      )
+      // Mask phone numbers & emails
+      .replace(/\b(1[3-9]\d)\d{4}(\d{4})\b/g, '$1****$2')
+      .replace(/\b([A-Za-z0-9._%+-]{1,2})[A-Za-z0-9._%+-]*@([A-Za-z0-9.-]+\.[A-Za-z]{2,})\b/g, '$1***@$2');
+
+    if (isFeishuConsole && /\/baseinfo\b/i.test(snap.url)) {
+      out = `[MuseDeck 本地隐私护盾：凭证页敏感字段已脱敏屏蔽，无需读取任何密钥；需要连接长连接时直接调用 feishu-assist {"op":"sync_local_bridge"} 即可] ` + out;
+    }
+    return out;
+  };
+
+  const safeElements = (snap.elements || [])
+    .filter((el) => {
+      if (isFeishuConsole) {
+        const lbl = `${el.label || ''} ${el.value || ''}`;
+        if (/App\s*Secret|重置|Reset|Encrypt\s*Key|Verification\s*Token|退出登录|注销/i.test(lbl)) {
+          return false;
+        }
+        const href = (el.href || '').toLowerCase();
+        if (href.includes('/document/') || href.includes('/hc/') || href.includes('feishu.cn/docx')) {
+          return false;
+        }
+      }
+      return true;
+    })
+    .map((el) => ({
+      ...el,
+      label: scrubText(el.label),
+      value: el.value ? scrubText(el.value) : undefined
+    }));
+
+  return {
+    url: snap.url,
+    title: scrubText(snap.title),
+    textExcerpt: scrubText(snap.textExcerpt),
+    elements: safeElements
+  };
+}
+
 export class LocalBrowserController {
   private localWin: BrowserWindow | null = null;
   private tailscaleWin: BrowserWindow | null = null;
   private tailscaleTimer: NodeJS.Timeout | null = null;
+  private feishuWc: WebContents | null = null;
+  private onFeishuCredentialsSynced?: (appId: string, appSecret: string) => Promise<boolean>;
+  private onFeishuProgress?: (msg: string) => void;
+
+  bindFeishuWebContents(
+    wc: WebContents | null,
+    onCredentialsSynced?: (appId: string, appSecret: string) => Promise<boolean>,
+    onProgress?: (msg: string) => void
+  ): void {
+    this.feishuWc = wc;
+    if (onCredentialsSynced) this.onFeishuCredentialsSynced = onCredentialsSynced;
+    if (onProgress) this.onFeishuProgress = onProgress;
+  }
+
+  private resolveTargetWc(target?: 'default' | 'feishu', urlHint?: string): WebContents {
+    const wantsFeishu =
+      target === 'feishu' ||
+      Boolean(urlHint && /open\.feishu\.cn|open\.larksuite\.com/i.test(urlHint));
+    if (wantsFeishu && this.feishuWc && !this.feishuWc.isDestroyed()) {
+      return this.feishuWc;
+    }
+    return this.ensureLocalWindow(false).webContents;
+  }
 
   private ensureLocalWindow(show = false): BrowserWindow {
     if (this.localWin && !this.localWin.isDestroyed()) {
@@ -313,27 +390,30 @@ export class LocalBrowserController {
     };
   }
 
-  async openUrl(rawUrl: string, waitMs = 1800): Promise<LocalBrowserSnapshot> {
+  async openUrl(
+    rawUrl: string,
+    waitMs = 1800,
+    target?: 'default' | 'feishu'
+  ): Promise<LocalBrowserSnapshot> {
     const normalized = /^https?:\/\//i.test(rawUrl.trim()) ? rawUrl.trim() : `https://${rawUrl.trim()}`;
     if (!isSafePublicBrowserUrl(normalized)) {
       throw new Error('Blocked unsafe or private network URL');
     }
-    const win = this.ensureLocalWindow(false);
+    const wc = this.resolveTargetWc(target, normalized);
     try {
       await Promise.race([
-        win.webContents.loadURL(normalized),
+        wc.loadURL(normalized),
         new Promise((r) => setTimeout(r, 12000))
       ]);
     } catch {
       // partial load still inspectable
     }
     await new Promise((r) => setTimeout(r, Math.min(6000, Math.max(400, waitMs))));
-    return this.snapshot();
+    return this.snapshot(target || (/open\.feishu\.cn/i.test(normalized) ? 'feishu' : 'default'));
   }
 
-  async snapshot(): Promise<LocalBrowserSnapshot> {
-    const win = this.ensureLocalWindow(false);
-    const wc = win.webContents;
+  async snapshot(target?: 'default' | 'feishu'): Promise<LocalBrowserSnapshot> {
+    const wc = this.resolveTargetWc(target);
     const js = `
       (() => {
         const textExcerpt = (document.body?.innerText || '').replace(/\\s+/g, ' ').trim().slice(0, 4000);
@@ -343,7 +423,11 @@ export class LocalBrowserController {
         const elements = [];
         let seq = 1;
         for (const el of nodes) {
-          if (elements.length >= 60) break;
+          if (elements.length >= 75) break;
+          if (!(el instanceof HTMLElement)) continue;
+          if (el.tagName === 'A' && el.getAttribute('target') === '_blank' && (el.getAttribute('href') || '').includes('/document/')) {
+            continue;
+          }
           const rect = el.getBoundingClientRect();
           if (rect.width < 8 || rect.height < 8) continue;
           const style = window.getComputedStyle(el);
@@ -364,7 +448,9 @@ export class LocalBrowserController {
             tag,
             type: el.getAttribute('type') || undefined,
             label,
-            value: ('value' in el && typeof el.value === 'string') ? el.value.slice(0, 80) : undefined,
+            value: (el.getAttribute('type') === 'password')
+              ? '[MASKED]'
+              : (('value' in el && typeof el.value === 'string') ? el.value.slice(0, 80) : undefined),
             href: ('href' in el && typeof el.href === 'string') ? el.href.slice(0, 160) : undefined
           });
         }
@@ -376,26 +462,34 @@ export class LocalBrowserController {
         };
       })()
     `;
-    return (await wc.executeJavaScript(js, true)) as LocalBrowserSnapshot;
+    const rawSnap = (await wc.executeJavaScript(js, true)) as LocalBrowserSnapshot;
+    return redactSnapshotPrivacy(rawSnap);
   }
 
   async act(req: {
     action: 'click' | 'fill' | 'press' | 'scroll';
+    target?: 'default' | 'feishu';
     targetId?: string;
     text?: string;
     key?: string;
     direction?: 'down' | 'up' | 'top' | 'bottom';
   }): Promise<{ ok: boolean; detail: string; snapshot: LocalBrowserSnapshot }> {
-    const win = this.ensureLocalWindow(false);
-    const wc = win.webContents;
+    const wc = this.resolveTargetWc(req.target);
+    const isFeishu =
+      req.target === 'feishu' || /open\.feishu\.cn|open\.larksuite\.com/i.test(wc.getURL());
+    if (isFeishu && req.targetId) {
+      const msg = `🤖 Muse 正在执行页面操作：${req.action} (${req.targetId})`;
+      this.onFeishuProgress?.(msg);
+      await setFeishuHud(wc, msg, 'running');
+    }
     const js = `
       (async () => {
         const req = ${JSON.stringify(req)};
         if (req.action === 'scroll') {
           if (req.direction === 'top') window.scrollTo(0, 0);
           else if (req.direction === 'bottom') window.scrollTo(0, document.body.scrollHeight);
-          else if (req.direction === 'up') window.scrollBy(0, -520);
-          else window.scrollBy(0, 520);
+          else if (req.direction === 'up') window.scrollBy(0, -480);
+          else window.scrollBy(0, 480);
           return { ok: true, detail: 'scrolled ' + (req.direction || 'down') };
         }
         if (req.action === 'press') {
@@ -411,19 +505,38 @@ export class LocalBrowserController {
         if (!target && req.targetId) {
           const kw = String(req.targetId).toLowerCase();
           target = Array.from(document.querySelectorAll('button, a, [role="button"], input, textarea'))
+            .filter((el) => {
+              const a = el.closest('a');
+              if (a && ((a.getAttribute('href') || '').includes('/document/') || a.getAttribute('target') === '_blank')) return false;
+              const t = (el.innerText || '').trim();
+              if (/App\\s*Secret|重置|Reset/i.test(t)) return false;
+              return true;
+            })
             .find((el) => ((el.innerText || el.getAttribute('placeholder') || el.getAttribute('aria-label') || '').toLowerCase()).includes(kw)) || null;
         }
         if (!target || !(target instanceof HTMLElement)) {
           return { ok: false, detail: 'Target element not found: ' + (req.targetId || '') };
         }
-        target.scrollIntoView({ block: 'center' });
+        const inModal = Boolean(target.closest('[role="dialog"], .ud__modal, .semi-modal-content, .arco-modal'));
+        const r = target.getBoundingClientRect();
+        if (!inModal && (r.top < 32 || r.bottom > window.innerHeight - 32)) {
+          target.scrollIntoView({ behavior: 'instant', block: 'nearest' });
+        }
+        const prevOutline = target.style.outline;
+        target.style.outline = '2.5px solid #10b981';
+        await new Promise((res) => setTimeout(res, 360));
+        target.style.outline = prevOutline;
+
         if (req.action === 'click') {
+          target.focus({ preventScroll: true });
+          target.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+          target.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
           target.click();
-          return { ok: true, detail: 'clicked ' + (req.targetId || '') };
+          return { ok: true, detail: 'clicked ' + (target.innerText || req.targetId || '').trim().slice(0, 40) };
         }
         if (req.action === 'fill') {
           const val = String(req.text || '');
-          target.focus();
+          target.focus({ preventScroll: true });
           if (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA') {
             const proto = target.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
             const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
@@ -442,8 +555,252 @@ export class LocalBrowserController {
     `;
     const res = (await wc.executeJavaScript(js, true)) as { ok: boolean; detail: string };
     await new Promise((r) => setTimeout(r, 750));
-    const snap = await this.snapshot();
+    const snap = await this.snapshot(isFeishu ? 'feishu' : req.target);
     return { ok: Boolean(res?.ok), detail: res?.detail || '', snapshot: snap };
+  }
+
+  /**
+   * Privacy-Shielded Local Feishu Helper for Muse Co-Pilot:
+   * Handles Monaco JSON injection and 100% local credential extraction + WebSocket connection
+   * so Muse NEVER reads, sees, or touches App Secret or any private key!
+   */
+  async feishuAssist(
+    op: 'status' | 'fill_permission_json' | 'sync_local_bridge'
+  ): Promise<Record<string, unknown>> {
+    const wc = this.resolveTargetWc('feishu');
+    const curUrl = wc.getURL();
+    if (!curUrl || !/open\.feishu\.cn|open\.larksuite\.com/i.test(curUrl)) {
+      await wc.loadURL('https://open.feishu.cn/app');
+      await waitPageSettled(wc, 1400);
+    }
+
+    if (op === 'status') {
+      const stateInfo = (await wc.executeJavaScript(
+        `(() => {
+          const href = location.href;
+          const txt = document.body?.innerText || '';
+          const onLogin = href.includes('accounts.feishu.cn') || href.includes('passport.feishu.cn');
+          const loggedIn = !onLogin && (txt.includes('企业自建应用') || txt.includes('凭证与基础信息') || /\\/app\\/cli_[a-zA-Z0-9]+/.test(href));
+          const menuItems = Array.from(document.querySelectorAll('aside *, nav *, [class*="menu"] *'))
+            .map((el) => (el instanceof HTMLElement ? (el.innerText || '').trim() : ''));
+          return {
+            loggedIn,
+            insideAppConsole: /\\/app\\/cli_[a-zA-Z0-9]+/.test(href),
+            hasBotCapabilityInMenu: menuItems.includes('机器人'),
+            hasReceiveEventOnPage: txt.includes('im.message.receive_v1')
+          };
+        })()`,
+        true
+      )) as Record<string, unknown>;
+      const snap = await this.snapshot('feishu');
+      return { ok: true, ...stateInfo, snapshot: snap };
+    }
+
+    if (op === 'fill_permission_json') {
+      this.onFeishuProgress?.('🔒 本地助手正在向权限编辑器写入 7 项飞书权限 JSON...');
+      await setFeishuHud(wc, '🔒 本地助手正在写入 7 项飞书权限 JSON...', 'running');
+
+      await wc.executeJavaScript(
+        `(() => {
+          const jsonStr = ${JSON.stringify(FEISHU_REQUIRED_SCOPES_JSON)};
+          const modal = document.querySelector('[role="dialog"], .ud__modal, .semi-modal-content, .arco-modal') || document;
+          if (window.monaco && window.monaco.editor && window.monaco.editor.getModels) {
+            const models = window.monaco.editor.getModels();
+            if (models.length > 0) models[models.length - 1].setValue(jsonStr);
+          }
+          const editorNodes = Array.from(modal.querySelectorAll('.monaco-editor, [class*="monaco"], [class*="editor"]'));
+          for (const node of editorNodes) {
+            const fiberKey = Object.keys(node).find((k) => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
+            let cur = fiberKey ? node[fiberKey] : null;
+            for (let depth = 0; cur && depth < 15; depth++, cur = cur.return) {
+              const inst = cur.stateNode;
+              if (inst && inst.editor && typeof inst.editor.setValue === 'function') {
+                inst.editor.setValue(jsonStr);
+              }
+              if (cur.ref && cur.ref.current && cur.ref.current.editor && typeof cur.ref.current.editor.setValue === 'function') {
+                cur.ref.current.editor.setValue(jsonStr);
+              }
+            }
+          }
+        })()`,
+        true
+      );
+      await sleep(350);
+
+      let hasScopes = (await wc.executeJavaScript(
+        `(() => {
+          const modal = document.querySelector('[role="dialog"], .ud__modal, .semi-modal-content, .arco-modal');
+          const txt = ((modal && modal.innerText) || '').replace(/\\u00a0/g, ' ');
+          return txt.includes('im:message:send_as_bot') && txt.includes('im:resource');
+        })()`,
+        true
+      )) as boolean;
+
+      if (!hasScopes) {
+        const prevClip = clipboard.readText();
+        try {
+          clipboard.writeText(FEISHU_REQUIRED_SCOPES_JSON);
+          const rect = (await wc.executeJavaScript(
+            `(() => {
+              const modal = document.querySelector('[role="dialog"], .ud__modal, .semi-modal-content, .arco-modal');
+              if (!modal) return null;
+              const inputArea = modal.querySelector('.monaco-editor textarea.inputarea, .monaco-editor textarea, textarea');
+              if (inputArea instanceof HTMLElement) inputArea.focus({ preventScroll: true });
+              const ed = modal.querySelector('.monaco-editor .view-lines, .monaco-editor, textarea');
+              if (!ed) return null;
+              const r = ed.getBoundingClientRect();
+              return { x: r.left, y: r.top, width: r.width, height: r.height };
+            })()`,
+            true
+          )) as { x: number; y: number; width: number; height: number } | null;
+
+          if (rect && rect.width > 40) {
+            await clickHardwareAt(
+              wc,
+              rect.x + Math.min(120, rect.width / 2),
+              rect.y + Math.min(60, rect.height / 2)
+            );
+          }
+          await sleep(200);
+          await sendSelectAllAndBackspace(wc);
+          wc.paste();
+          await sleep(650);
+          hasScopes = (await wc.executeJavaScript(
+            `(() => {
+              const modal = document.querySelector('[role="dialog"], .ud__modal, .semi-modal-content, .arco-modal');
+              const txt = ((modal && modal.innerText) || '').replace(/\\u00a0/g, ' ');
+              return txt.includes('im:message') && txt.includes('im:resource');
+            })()`,
+            true
+          )) as boolean;
+        } finally {
+          clipboard.writeText(prevClip);
+        }
+      }
+
+      const snap = await this.snapshot('feishu');
+      return {
+        ok: hasScopes,
+        scopesInjected: hasScopes,
+        note: hasScopes
+          ? 'Required 7 Feishu permission scopes injected into modal editor. Click Next / 确认新增权限 -> 申请开通 in snapshot.elements.'
+          : 'Permission modal editor not detected yet; ensure 批量导入/导出权限 modal is open first.',
+        snapshot: snap
+      };
+    }
+
+    if (op === 'sync_local_bridge') {
+      const m = wc.getURL().match(/\/app\/(cli_[a-zA-Z0-9]+)/);
+      if (!m) {
+        const snap = await this.snapshot('feishu');
+        return {
+          ok: false,
+          localWebSocketConnected: false,
+          note: 'Not inside a specific /app/cli_xxxx console page yet. Open or create the app first.',
+          snapshot: snap
+        };
+      }
+      const appId = m[1];
+      const returnUrl = wc.getURL();
+      this.onFeishuProgress?.('🔒 本地隐私护盾正在后台自动绑定凭证并连接飞书 WebSocket（密钥零外泄）...');
+      await setFeishuHud(wc, '🔒 本地隐私护盾正在自动连接本地飞书长连接（Muse 零接触密钥）...', 'running');
+
+      if (!returnUrl.includes('/baseinfo')) {
+        await wc.loadURL(`https://open.feishu.cn/app/${appId}/baseinfo`);
+        await waitPageSettled(wc, 1200);
+        await waitForPageKeyword(wc, ['App ID', 'App Secret', '凭证与基础信息'], 6500);
+      }
+
+      let secret = '';
+      const prevClip = clipboard.readText();
+      try {
+        clipboard.writeText('');
+        const meta = (await wc.executeJavaScript(
+          `(() => {
+            const labels = Array.from(document.querySelectorAll('div, span, td, th, label'));
+            const secretLabel = labels.find((el) => (el.innerText || '').trim() === 'App Secret');
+            const row =
+              (secretLabel && secretLabel.closest('tr, [class*="row"], [class*="item"], [class*="field"], [class*="secret"]')) ||
+              (secretLabel && secretLabel.parentElement && secretLabel.parentElement.parentElement);
+            if (!row) return { direct: '', count: 0 };
+            const rowTxt = row.innerText || '';
+            const directMatch = rowTxt.match(/\\b([a-zA-Z0-9]{28,40})\\b/g) || [];
+            const validDirect = directMatch.find((s) => !s.startsWith('cli_') && /[a-zA-Z]/.test(s) && /\\d/.test(s)) || '';
+            const btns = Array.from(row.querySelectorAll('button, [role="button"], span[class*="icon"], svg'))
+              .map((el) => el.closest('button, [role="button"]') || el)
+              .filter((el, idx, arr) => {
+                if (!(el instanceof HTMLElement) || arr.indexOf(el) !== idx) return false;
+                const t = (el.innerText || el.getAttribute('title') || el.getAttribute('aria-label') || '').trim();
+                if (/重置|Reset/i.test(t)) return false;
+                const r = el.getBoundingClientRect();
+                return r.width >= 12 && r.width <= 80 && r.height >= 12 && r.height <= 48;
+              })
+              .slice(0, 3);
+            btns.forEach((b, i) => b.setAttribute('data-fmc-priv-sec', String(i)));
+            return { direct: validDirect, count: btns.length };
+          })()`,
+          true
+        )) as { direct: string; count: number };
+
+        if (meta.direct) {
+          secret = meta.direct;
+        } else {
+          for (let idx = 0; idx < meta.count; idx++) {
+            await wc.executeJavaScript(
+              `(() => {
+                const b = document.querySelector('[data-fmc-priv-sec="${idx}"]');
+                if (b instanceof HTMLElement) b.click();
+              })()`,
+              true
+            );
+            await sleep(450);
+            const clipVal = clipboard.readText().trim();
+            if (/^[a-zA-Z0-9]{24,44}$/.test(clipVal) && !clipVal.startsWith('cli_')) {
+              secret = clipVal;
+              break;
+            }
+            const domSec = (await wc.executeJavaScript(
+              `(() => {
+                const matches = (document.body?.innerText || '').match(/\\b([a-zA-Z0-9]{28,40})\\b/g) || [];
+                return matches.find((s) => !s.startsWith('cli_') && /[a-zA-Z]/.test(s) && /\\d/.test(s)) || '';
+              })()`,
+              true
+            )) as string;
+            if (domSec) {
+              secret = domSec;
+              break;
+            }
+          }
+        }
+      } finally {
+        clipboard.writeText(prevClip);
+      }
+
+      let connected = false;
+      if (secret && this.onFeishuCredentialsSynced) {
+        connected = await this.onFeishuCredentialsSynced(appId, secret);
+        await sleep(1200);
+      }
+
+      if (connected) {
+        this.onFeishuProgress?.('✅ 本地隐私护盾已完成凭证托管并连上飞书 WebSocket 长连接！');
+        await setFeishuHud(wc, '✅ 本地飞书 WebSocket 长连接已就绪（密钥全程仅存本机）', 'ok');
+      }
+
+      const snap = await this.snapshot('feishu');
+      // ZERO secret / credential returned to Muse!
+      return {
+        ok: connected,
+        localWebSocketConnected: connected,
+        privacyShield: 'ACTIVE_ZERO_SECRET_EXPOSED',
+        note: connected
+          ? 'Local Feishu WebSocket bridge is now ONLINE! You may now proceed to 事件与回调 (Event Subscriptions) -> select 使用长连接接收事件 -> Save -> add im.message.receive_v1.'
+          : 'Could not auto-connect local WebSocket yet; continue configuring UI sections and remind user to click Connect in MuseDeck if needed.',
+        snapshot: snap
+      };
+    }
+
+    return { ok: false, error: 'Unsupported feishuAssist op' };
   }
 
   /**

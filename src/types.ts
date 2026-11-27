@@ -140,6 +140,7 @@ export type WorkflowPhase =
   | 'running'
   | 'reviewing'
   | 'awaiting_user'
+  | 'paused_quota'
   | 'paused_budget'
   | 'completed';
 
@@ -170,6 +171,8 @@ export interface WorkflowRunState {
   planApproved?: boolean;
   lastSummary?: string;
   pauseReason?: string;
+  quotaRetryAt?: string;
+  lastHandoffFrom?: string;
   updatedAt: string;
 }
 

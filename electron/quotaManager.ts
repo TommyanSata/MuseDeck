@@ -257,9 +257,35 @@ async function queryMeteredBalance(
 export class QuotaManager {
   private store: FmcStore;
   private cache = new Map<string, CliQuotaSnapshot>();
+  private runtimeExhausted = new Map<string, { until: number; reason: string }>();
 
   constructor(store: FmcStore) {
     this.store = store;
+  }
+
+  markRuntimeExhausted(cliId: string, reason: string, cooldownMs = 30 * 60_000): void {
+    const safeCooldown = Math.min(2 * 60 * 60_000, Math.max(60_000, cooldownMs));
+    this.runtimeExhausted.set(cliId, {
+      until: Date.now() + safeCooldown,
+      reason: reason || 'CLI 运行时触发额度/速率限制'
+    });
+    this.cache.delete(cliId);
+  }
+
+  clearRuntimeExhausted(cliId: string): void {
+    if (this.runtimeExhausted.delete(cliId)) {
+      this.cache.delete(cliId);
+    }
+  }
+
+  isRuntimeExhausted(cliId: string): boolean {
+    const hit = this.runtimeExhausted.get(cliId);
+    if (!hit) return false;
+    if (Date.now() >= hit.until) {
+      this.runtimeExhausted.delete(cliId);
+      return false;
+    }
+    return true;
   }
 
   private computeLocalWindowTokens(cliId: string): {
@@ -355,6 +381,17 @@ export class QuotaManager {
           bal.balanceNumeric <= 0.1 ? 'exhausted' : bal.balanceNumeric < 2 ? 'tight' : 'healthy';
       } else {
         snapshot.health = 'unknown';
+      }
+    }
+
+    const rtHit = this.runtimeExhausted.get(cliId);
+    if (rtHit) {
+      if (Date.now() < rtHit.until) {
+        snapshot.health = 'exhausted';
+        snapshot.error = rtHit.reason;
+        snapshot.source = '运行时限额实时熔断';
+      } else {
+        this.runtimeExhausted.delete(cliId);
       }
     }
 

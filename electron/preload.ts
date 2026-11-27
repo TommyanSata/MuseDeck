@@ -25,6 +25,7 @@ contextBridge.exposeInMainWorld('fmc', {
   approveWorkflow: () => ipcRenderer.invoke('workflow:approve'),
   resumeWorkflowBudget: (extraTokens?: number) =>
     ipcRenderer.invoke('workflow:addBudget', extraTokens),
+  retryWorkflowQuota: () => ipcRenderer.invoke('workflow:retryQuota'),
   sendWorkflowFeedback: (text: string) => ipcRenderer.invoke('workflow:feedback', text),
   resetWorkflow: () => ipcRenderer.invoke('workflow:reset'),
   performCloseAction: (action: 'tray' | 'quit', remember: boolean) =>
@@ -100,6 +101,8 @@ contextBridge.exposeInMainWorld('fmc', {
     ipcRenderer.invoke('browser:openLocalControlled', url),
   runFeishuAutoPilot: (params?: { botName?: string; botDesc?: string; existingAppId?: string }) =>
     ipcRenderer.invoke('autopilot:feishu', params),
+  runMuseFeishuCoPilot: (params?: { botName?: string; botDesc?: string }) =>
+    ipcRenderer.invoke('autopilot:museFeishu', params),
   getWhatsNew: () => ipcRenderer.invoke('app:getWhatsNew'),
   ackWhatsNew: () => ipcRenderer.invoke('app:ackWhatsNew'),
   checkAppUpdate: () => ipcRenderer.invoke('app:checkUpdate'),

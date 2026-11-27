@@ -28,12 +28,57 @@ export interface RunningTaskInfo {
   messageId: string;
   status: 'running' | 'done' | 'error' | 'cancelled';
   output: string;
+  cwd?: string;
+  prompt?: string;
   worktreePath?: string;
   worktreeBranch?: string;
   diffStat?: string;
+  quotaExhausted?: boolean;
+  quotaReason?: string;
+  quotaRetryAfterMs?: number;
   startedAt: string;
   finishedAt?: string;
   exitCode?: number | null;
+}
+
+export function detectQuotaExhaustion(
+  output: string,
+  exitCode?: number | null
+): { exhausted: boolean; reason: string; retryAfterMs?: number } {
+  const tail = (output || '').slice(-4000);
+  const fatalRegex =
+    /(?:usage[_ ]limit|rate[_ ]limit[_ ]exceeded|rate limit reached|you've hit your limit|hit your usage limit|exceeded your current quota|insufficient[_ ]quota|insufficient balance|credit balance is too low|billing hard limit|429\s+too many requests|resource_exhausted|quota exceeded|额度已用完|额度不足|余额不足|达到.*(?:使用|调用)?限额|触发限流)/i;
+  const match = tail.match(fatalRegex);
+  if (!match) return { exhausted: false, reason: '' };
+
+  // Avoid false positives when a CLI succeeded (exitCode 0) and merely printed code mentioning "rate limit"
+  if (exitCode === 0 && (output || '').length > 520) {
+    return { exhausted: false, reason: '' };
+  }
+
+  let retryAfterMs: number | undefined;
+  const minMatch = tail.match(/(?:try again|resets?|retry|wait)\s+in\s+(\d+)\s*(?:m|min|mins|minutes?)\b/i);
+  const secMatch = tail.match(/(?:try again|resets?|retry|wait)\s+in\s+(\d+)\s*(?:s|sec|secs|seconds?)\b/i);
+  const hrMatch = tail.match(/(?:try again|resets?|retry|wait)\s+in\s+(\d+)\s*(?:h|hr|hrs|hours?)\b/i);
+  if (hrMatch) {
+    retryAfterMs = Math.min(60 * 60_000, Math.max(60_000, Number(hrMatch[1]) * 60 * 60_000));
+  } else if (minMatch) {
+    retryAfterMs = Math.min(60 * 60_000, Math.max(60_000, Number(minMatch[1]) * 60_000));
+  } else if (secMatch) {
+    retryAfterMs = Math.min(60 * 60_000, Math.max(45_000, Number(secMatch[1]) * 1000));
+  }
+
+  const line =
+    tail
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .find((l) => fatalRegex.test(l)) || match[0];
+
+  return {
+    exhausted: true,
+    reason: line.slice(0, 180),
+    retryAfterMs
+  };
 }
 
 export class CliRunner {
@@ -271,6 +316,8 @@ export class CliRunner {
       messageId: outputMsg.id,
       status: 'running',
       output: '',
+      cwd,
+      prompt: req.prompt,
       worktreePath,
       worktreeBranch,
       startedAt: new Date().toISOString()
@@ -366,7 +413,15 @@ export class CliRunner {
       this.procs.delete(taskId);
       if (taskInfo.status === 'cancelled') return;
       taskInfo.exitCode = code;
-      taskInfo.status = code === 0 ? 'done' : 'error';
+      const quotaCheck = detectQuotaExhaustion(taskInfo.output, code);
+      if (quotaCheck.exhausted) {
+        taskInfo.status = 'error';
+        taskInfo.quotaExhausted = true;
+        taskInfo.quotaReason = quotaCheck.reason;
+        taskInfo.quotaRetryAfterMs = quotaCheck.retryAfterMs;
+      } else {
+        taskInfo.status = code === 0 ? 'done' : 'error';
+      }
       taskInfo.finishedAt = new Date().toISOString();
       const diffStat = await this.collectDiffStat(cwd);
       taskInfo.diffStat = diffStat || undefined;

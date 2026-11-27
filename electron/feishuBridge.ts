@@ -1,4 +1,5 @@
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import * as lark from '@larksuiteoapi/node-sdk';
 import { BrowserWindow, session } from 'electron';
@@ -18,23 +19,45 @@ export interface FeishuStatusPayload {
   };
 }
 
+export interface FeishuIncomingContext {
+  text: string;
+  chatId: string;
+  messageId: string;
+  rootId?: string;
+  parentId?: string;
+  threadKey?: string;
+  imagePaths?: string[];
+}
+
+interface ActiveThreadTarget {
+  messageId: string;
+  rootId?: string;
+  threadKey?: string;
+  updatedAt: number;
+}
+
 export class FeishuBridge {
   private store: FmcStore;
   private runner: CliRunner;
   private onStatus: (status: FeishuStatusPayload) => void;
   private onStateChanged: () => void;
-  private onForwardToMuse: (text: string, chatId: string) => Promise<{ ok: boolean; message: string }>;
+  private onForwardToMuse: (
+    ctx: FeishuIncomingContext
+  ) => Promise<{ ok: boolean; message: string }>;
   private client: lark.Client | null = null;
   private wsClient: lark.WSClient | null = null;
   private activeAppId = '';
   private currentStatus: FeishuStatusPayload = { state: 'disconnected' };
+  private seenMessageIds = new Set<string>();
+  private chatReplyTargets = new Map<string, ActiveThreadTarget>();
+  private knownBotThreads = new Set<string>();
 
   constructor(
     store: FmcStore,
     runner: CliRunner,
     onStatus: (status: FeishuStatusPayload) => void,
     onStateChanged: () => void,
-    onForwardToMuse: (text: string, chatId: string) => Promise<{ ok: boolean; message: string }>
+    onForwardToMuse: (ctx: FeishuIncomingContext) => Promise<{ ok: boolean; message: string }>
   ) {
     this.store = store;
     this.runner = runner;
@@ -50,6 +73,177 @@ export class FeishuBridge {
   private setStatus(next: FeishuStatusPayload): void {
     this.currentStatus = next;
     this.onStatus(next);
+  }
+
+  private rememberMessageId(id: string): boolean {
+    if (!id) return true;
+    if (this.seenMessageIds.has(id)) return false;
+    this.seenMessageIds.add(id);
+    if (this.seenMessageIds.size > 500) {
+      const oldest = this.seenMessageIds.values().next().value;
+      if (oldest) this.seenMessageIds.delete(oldest);
+    }
+    return true;
+  }
+
+  private async fetchTenantAccessToken(): Promise<string | null> {
+    const st = this.store.getState().feishu;
+    if (!st.appId || !st.appSecret) return null;
+    try {
+      const resp = await fetch(
+        'https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ app_id: st.appId, app_secret: st.appSecret })
+        }
+      );
+      const json = (await resp.json()) as { code?: number; tenant_access_token?: string };
+      return json.code === 0 && json.tenant_access_token ? json.tenant_access_token : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** Instant reaction feedback (👀 OnIt on arrival, ✅ DONE on completion) */
+  async addReaction(messageId: string, emojiType: 'OnIt' | 'DONE' | 'Get' = 'OnIt'): Promise<void> {
+    if (!this.client || !messageId) return;
+    try {
+      await this.client.im.messageReaction.create({
+        path: { message_id: messageId },
+        data: { reaction_type: { emoji_type: emojiType } }
+      });
+    } catch {
+      if (emojiType === 'OnIt') {
+        try {
+          await this.client.im.messageReaction.create({
+            path: { message_id: messageId },
+            data: { reaction_type: { emoji_type: 'Get' } }
+          });
+        } catch {
+          // non-fatal if reaction scope is absent on older bots
+        }
+      }
+    }
+  }
+
+  /** Download user-sent Feishu screenshot(s) via im/v1/messages/:id/resources/:key?type=image */
+  private async downloadIncomingImages(
+    messageId: string,
+    imageKeys: string[]
+  ): Promise<string[]> {
+    if (!messageId || imageKeys.length === 0) return [];
+    const token = await this.fetchTenantAccessToken();
+    if (!token) return [];
+
+    const proj = this.store.getState().projects[0];
+    let inboxDir = path.join(os.homedir(), '.musedeck-inbox');
+    if (proj?.repoPath) {
+      try {
+        const resolved = path.resolve(proj.repoPath);
+        if (fs.existsSync(resolved) && fs.statSync(resolved).isDirectory()) {
+          inboxDir = path.join(resolved, '.musedeck', 'feishu-inbox');
+        }
+      } catch {
+        // fallback to home inbox
+      }
+    }
+    fs.mkdirSync(inboxDir, { recursive: true });
+
+    const savedPaths: string[] = [];
+    for (const key of imageKeys.slice(0, 4)) {
+      try {
+        const url = `https://open.feishu.cn/open-apis/im/v1/messages/${encodeURIComponent(
+          messageId
+        )}/resources/${encodeURIComponent(key)}?type=image`;
+        const resp = await fetch(url, {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        if (!resp.ok) continue;
+        const ct = (resp.headers.get('content-type') || '').toLowerCase();
+        const buf = Buffer.from(await resp.arrayBuffer());
+        // Cap single image at 10MB
+        if (buf.length === 0 || buf.length > 10 * 1024 * 1024) continue;
+
+        let ext = 'png';
+        if (ct.includes('jpeg') || ct.includes('jpg') || (buf[0] === 0xff && buf[1] === 0xd8)) {
+          ext = 'jpg';
+        } else if (ct.includes('webp') || buf.subarray(8, 12).toString('ascii') === 'WEBP') {
+          ext = 'webp';
+        } else if (ct.includes('gif') || buf.subarray(0, 3).toString('ascii') === 'GIF') {
+          ext = 'gif';
+        }
+
+        const safeKey = key.replace(/[^a-zA-Z0-9_-]/g, '').slice(-12) || String(Date.now());
+        const filePath = path.join(inboxDir, `feishu-${Date.now()}-${safeKey}.${ext}`);
+        fs.writeFileSync(filePath, buf);
+        savedPaths.push(filePath);
+      } catch {
+        // continue remaining images
+      }
+    }
+    return savedPaths;
+  }
+
+  private parseIncomingContent(
+    msgType: string,
+    rawContent: string
+  ): { text: string; imageKeys: string[] } {
+    const imageKeys: string[] = [];
+    let text = '';
+
+    try {
+      const parsed = JSON.parse(rawContent) as Record<string, unknown>;
+      if (msgType === 'image') {
+        const ik = String(parsed.image_key || '').trim();
+        if (ik) imageKeys.push(ik);
+      } else if (msgType === 'post') {
+        // Feishu rich-text post: { title, content: [[{ tag: 'text'|'img'|'a'|'code_block', ... }]] }
+        const findBlocks = (obj: unknown): { title?: string; content?: unknown[][] } => {
+          if (!obj || typeof obj !== 'object') return {};
+          const rec = obj as Record<string, unknown>;
+          if (Array.isArray(rec.content)) {
+            return {
+              title: typeof rec.title === 'string' ? rec.title : undefined,
+              content: rec.content as unknown[][]
+            };
+          }
+          for (const v of Object.values(rec)) {
+            if (v && typeof v === 'object') {
+              const nested = findBlocks(v);
+              if (nested.content) return nested;
+            }
+          }
+          return {};
+        };
+        const post = findBlocks(parsed);
+        const lines: string[] = [];
+        if (post.title?.trim()) lines.push(post.title.trim());
+        for (const para of post.content || []) {
+          if (!Array.isArray(para)) continue;
+          let line = '';
+          for (const node of para) {
+            if (!node || typeof node !== 'object') continue;
+            const n = node as Record<string, unknown>;
+            const tag = String(n.tag || '');
+            if (tag === 'text' || tag === 'a' || tag === 'code_block' || tag === 'md') {
+              line += String(n.text || '');
+            } else if (tag === 'img' && typeof n.image_key === 'string') {
+              imageKeys.push(n.image_key);
+            }
+          }
+          if (line.trim()) lines.push(line.trim());
+        }
+        text = lines.join('\n');
+      } else if (typeof parsed.text === 'string') {
+        text = parsed.text;
+      }
+    } catch {
+      text = rawContent;
+    }
+
+    text = text.replace(/@_user_\d+\s*/g, '').trim();
+    return { text, imageKeys };
   }
 
   async connect(appId: string, appSecret: string): Promise<FeishuStatusPayload> {
@@ -185,19 +379,60 @@ export class FeishuBridge {
   private async handleIncomingMessage(data: Record<string, unknown>): Promise<void> {
     const message = (data.message || {}) as Record<string, unknown>;
     const sender = (data.sender || {}) as Record<string, unknown>;
-    const senderId = ((sender.sender_id || {}) as Record<string, string>).open_id || '';
-    const chatId = String(message.chat_id || '');
-    const messageId = String(message.message_id || '');
-    const rawContent = String(message.content || '{}');
+    if (String(sender.sender_type || '') === 'app') return;
 
-    let text = rawContent;
-    try {
-      const parsed = JSON.parse(rawContent) as { text?: string };
-      if (parsed.text) text = parsed.text.replace(/@_user_\d+\s*/g, '').trim();
-    } catch {
-      // keep raw text
+    const messageId = String(message.message_id || '');
+    if (!this.rememberMessageId(messageId)) return;
+
+    const chatType = String(message.chat_type || 'p2p');
+    const rootId = String(message.root_id || '').trim() || undefined;
+    const parentId = String(message.parent_id || '').trim() || undefined;
+    const mentions = Array.isArray(message.mentions) ? message.mentions : [];
+
+    // In group chats, only respond when explicitly @mentioned or continuing a thread started with the bot
+    if (chatType !== 'p2p' && mentions.length === 0 && (!rootId || !this.knownBotThreads.has(rootId))) {
+      return;
     }
 
+    // 1. Instant 0.2s 👀 (OnIt) reaction so mobile user immediately sees receipt!
+    if (messageId) {
+      void this.addReaction(messageId, 'OnIt');
+    }
+
+    const senderId = ((sender.sender_id || {}) as Record<string, string>).open_id || '';
+    const chatId = String(message.chat_id || '');
+    const msgType = String(message.message_type || 'text').toLowerCase();
+    const rawContent = String(message.content || '{}');
+
+    const { text: parsedText, imageKeys } = this.parseIncomingContent(msgType, rawContent);
+    const imagePaths = await this.downloadIncomingImages(messageId, imageKeys);
+
+    const text =
+      parsedText ||
+      (imagePaths.length > 0
+        ? '请查看我从飞书发来的截图并帮我分析处理'
+        : msgType === 'file'
+          ? '[收到文件消息，暂支持直接发送截图或粘贴文本内容]'
+          : '');
+    if (!text && imagePaths.length === 0) return;
+
+    const threadKey = rootId || parentId || (chatType !== 'p2p' ? messageId : undefined);
+    if (threadKey) {
+      this.knownBotThreads.add(threadKey);
+    }
+    if (chatId && messageId) {
+      this.chatReplyTargets.set(chatId, {
+        messageId,
+        rootId: rootId || (chatType !== 'p2p' ? messageId : undefined),
+        threadKey,
+        updatedAt: Date.now()
+      });
+    }
+
+    const displayPing =
+      imagePaths.length > 0
+        ? `${parsedText ? `${parsedText} ` : ''}[附带 ${imagePaths.length} 张截图]`
+        : text;
     const now = new Date().toISOString();
     const currentAppId = this.activeAppId || this.store.getState().feishu.appId;
     const prevFeishu = this.store.getState().feishu;
@@ -216,7 +451,7 @@ export class FeishuBridge {
           s.feishu.allowOpenIds.push(senderId);
         }
       }
-      s.feishu.lastPingMessage = text;
+      s.feishu.lastPingMessage = displayPing;
     });
     this.onStateChanged();
 
@@ -224,33 +459,22 @@ export class FeishuBridge {
       state: 'connected',
       connectedAppId: currentAppId,
       verified: true,
-      message: `已成功监听到飞书消息：「${text}」，双向通道连通正常！`,
+      message: `已成功监听到飞书消息：「${displayPing}」，双向通道连通正常！`,
       lastPing: {
-        text,
+        text: displayPing,
         senderOpenId: senderId,
         chatId,
         receivedAt: now
       }
     });
 
-    // React with Get emoji (inspired by hjuyam/muse-feishu-bridge)
-    if (this.client && messageId) {
-      try {
-        await this.client.im.messageReaction.create({
-          path: { message_id: messageId },
-          data: { reaction_type: { emoji_type: 'Get' } }
-        });
-      } catch {
-        // non-fatal if reaction scope wasn't granted
-      }
-    }
-
     // If first verification ping, reply confirmation immediately
     if (!wasVerified && chatId) {
       await this.sendText(
         chatId,
-        `✅ MuseDeck 桌面总控台已成功收到你的消息：「${text}」\n当前机器人（${currentAppId}）长连接双向验证通过，可返回电脑继续下一步配置！`
+        `✅ MuseDeck 桌面总控台已成功收到你的消息：「${displayPing}」\n当前机器人（${currentAppId}）长连接双向验证通过，现在可直接发文字或报错截图指挥 Muse 与本地 CLI！`
       );
+      void this.addReaction(messageId, 'DONE');
       return;
     }
 
@@ -258,7 +482,10 @@ export class FeishuBridge {
     const slashMatch = text.match(/^\/(claude|codex|gemini|pi|opencode|antigravity)\s+([\s\S]+)$/i);
     if (slashMatch) {
       const agentId = slashMatch[1].toLowerCase();
-      const prompt = slashMatch[2].trim();
+      let prompt = slashMatch[2].trim();
+      if (imagePaths.length > 0) {
+        prompt += `\n\n[附带本地截图文件路径，请直接读取查看图片内容]\n${imagePaths.map((p) => `- ${p}`).join('\n')}`;
+      }
       const defaultProj = this.store.getState().projects[0];
       const info = await this.runner.dispatch({
         projectId: defaultProj.id,
@@ -270,7 +497,7 @@ export class FeishuBridge {
       if (chatId) {
         await this.sendText(
           chatId,
-          `🚀 已将任务派发给 [${agentId}]（任务 ID: ${info.taskId}），可在电脑 FMC 面板查看实时流式输出。`
+          `🚀 已将任务${imagePaths.length > 0 ? `（含 ${imagePaths.length} 张截图）` : ''}派发给 [${agentId}]（任务 ID: ${info.taskId}），可在电脑 MuseDeck 面板查看实时流式输出。`
         );
       }
       return;
@@ -282,30 +509,73 @@ export class FeishuBridge {
       projectId: defaultProj.id,
       source: 'feishu',
       role: 'directive',
-      title: '来自手机飞书的指令（已转交 Muse）',
-      content: text,
+      title: `来自手机飞书的指令${threadKey ? ` · 话题 #${threadKey.slice(-6)}` : ''}${imagePaths.length > 0 ? ` · 含 ${imagePaths.length} 张图` : ''}`,
+      content:
+        imagePaths.length > 0
+          ? `${text}\n\n[已接收飞书截图并保存至本地]\n${imagePaths.join('\n')}`
+          : text,
       status: 'done'
     });
     this.onStateChanged();
 
-    const fwd = await this.onForwardToMuse(text, chatId);
+    const fwd = await this.onForwardToMuse({
+      text,
+      chatId,
+      messageId,
+      rootId,
+      parentId,
+      threadKey,
+      imagePaths: imagePaths.length > 0 ? imagePaths : undefined
+    });
     if (chatId) {
       if (fwd.ok) {
         await this.sendText(
           chatId,
-          `🤖 已将你的指令转交给电脑端 Muse 总管处理：\n「${text}」\n任务完成后会自动汇报到这里。`
+          `🤖 已将你的${imagePaths.length > 0 ? `截图（${imagePaths.length} 张）与` : ''}指令转交给电脑端 Muse 总管：\n「${text}」\n处理完成后将自动在此${rootId ? '话题串' : '对话'}汇报。`
         );
       } else {
         await this.sendText(
           chatId,
-          `⚠️ FMC 已收到指令「${text}」，但自动转发给 Muse 失败：${fwd.message}\n你也可以直接发 /codex <指令> 跳过 Muse 直接调度本地 CLI。`
+          `⚠️ MuseDeck 已收到指令「${displayPing}」，但自动转发给 Muse 失败：${fwd.message}\n你也可以直接发 /codex <指令> 跳过 Muse 直接调度本地 CLI。`
         );
       }
     }
   }
 
-  async sendText(chatId: string, text: string): Promise<boolean> {
+  private getActiveThreadTarget(chatId: string): ActiveThreadTarget | undefined {
+    const ctx = this.chatReplyTargets.get(chatId);
+    if (!ctx) return undefined;
+    // Keep thread reply context fresh for 45 minutes
+    if (Date.now() - ctx.updatedAt > 45 * 60 * 1000) return undefined;
+    return ctx;
+  }
+
+  async sendText(
+    chatId: string,
+    text: string,
+    opts?: { replyToMessageId?: string; replyInThread?: boolean }
+  ): Promise<boolean> {
     if (!this.client || !chatId) return false;
+    const threadCtx = this.getActiveThreadTarget(chatId);
+    const replyMsgId = opts?.replyToMessageId || (threadCtx?.rootId ? threadCtx.messageId : undefined);
+    const replyInThread = opts?.replyInThread ?? Boolean(threadCtx?.rootId);
+
+    if (replyMsgId && replyInThread) {
+      try {
+        await this.client.im.message.reply({
+          path: { message_id: replyMsgId },
+          data: {
+            msg_type: 'text',
+            content: JSON.stringify({ text }),
+            reply_in_thread: true
+          }
+        });
+        return true;
+      } catch {
+        // fallback to regular chat send
+      }
+    }
+
     try {
       await this.client.im.message.create({
         params: { receive_id_type: 'chat_id' },
@@ -359,13 +629,20 @@ export class FeishuBridge {
       const m = raw.match(/^data:(image\/[^;]+);base64,(.+)$/i);
       if (!m) return null;
       const mime = m[1].toLowerCase();
-      let buf = Buffer.from(m[2], 'base64');
+      const buf = Buffer.from(m[2], 'base64');
       if (mime.includes('svg')) {
         const png = await this.rasterizeSvgToPng(buf);
         if (!png) return null;
         return { buf: png, mime: 'image/png', filename: 'image.png' };
       }
-      const ext = mime.includes('jpeg') || mime.includes('jpg') ? 'jpg' : mime.includes('webp') ? 'webp' : mime.includes('gif') ? 'gif' : 'png';
+      const ext =
+        mime.includes('jpeg') || mime.includes('jpg')
+          ? 'jpg'
+          : mime.includes('webp')
+            ? 'webp'
+            : mime.includes('gif')
+              ? 'gif'
+              : 'png';
       return { buf, mime, filename: `image.${ext}` };
     }
 
@@ -378,21 +655,30 @@ export class FeishuBridge {
           resp = await fetch(raw);
         }
         if (!resp.ok) return null;
-        const ct = (resp.headers.get('content-type') || 'image/png').split(';')[0].trim().toLowerCase();
+        const ct = (resp.headers.get('content-type') || 'image/png')
+          .split(';')[0]
+          .trim()
+          .toLowerCase();
         const buf = Buffer.from(await resp.arrayBuffer());
         if (ct.includes('svg') || raw.toLowerCase().endsWith('.svg')) {
           const png = await this.rasterizeSvgToPng(buf);
           if (!png) return null;
           return { buf: png, mime: 'image/png', filename: 'image.png' };
         }
-        const ext = ct.includes('jpeg') || ct.includes('jpg') ? 'jpg' : ct.includes('webp') ? 'webp' : ct.includes('gif') ? 'gif' : 'png';
+        const ext =
+          ct.includes('jpeg') || ct.includes('jpg')
+            ? 'jpg'
+            : ct.includes('webp')
+              ? 'webp'
+              : ct.includes('gif')
+                ? 'gif'
+                : 'png';
         return { buf, mime: ct.startsWith('image/') ? ct : 'image/png', filename: `image.${ext}` };
       } catch {
         return null;
       }
     }
 
-    // Local file path (absolute or relative to workspace / project dirs)
     const candidates = path.isAbsolute(raw)
       ? [raw]
       : [...fallbackDirs.map((d) => path.resolve(d, raw)), path.resolve(process.cwd(), raw)];
@@ -424,32 +710,24 @@ export class FeishuBridge {
 
   async sendImage(chatId: string, source: string, fallbackDirs: string[] = []): Promise<boolean> {
     if (!this.client || !chatId) return false;
-    const st = this.store.getState().feishu;
-    if (!st.appId || !st.appSecret) return false;
 
     try {
       const loaded = await this.loadImageBuffer(source, fallbackDirs);
       if (!loaded || loaded.buf.length === 0) return false;
 
-      // 1. Obtain tenant_access_token
-      const tokenResp = await fetch(
-        'https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal',
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ app_id: st.appId, app_secret: st.appSecret })
-        }
-      );
-      const tokenJson = (await tokenResp.json()) as { code?: number; tenant_access_token?: string };
-      if (tokenJson.code !== 0 || !tokenJson.tenant_access_token) return false;
+      const token = await this.fetchTenantAccessToken();
+      if (!token) return false;
 
-      // 2. Upload image to Feishu im/v1/images
       const form = new FormData();
       form.append('image_type', 'message');
-      form.append('image', new Blob([new Uint8Array(loaded.buf)], { type: loaded.mime }), loaded.filename);
+      form.append(
+        'image',
+        new Blob([new Uint8Array(loaded.buf)], { type: loaded.mime }),
+        loaded.filename
+      );
       const uploadResp = await fetch('https://open.feishu.cn/open-apis/im/v1/images', {
         method: 'POST',
-        headers: { Authorization: `Bearer ${tokenJson.tenant_access_token}` },
+        headers: { Authorization: `Bearer ${token}` },
         body: form
       });
       const uploadJson = (await uploadResp.json()) as {
@@ -459,7 +737,23 @@ export class FeishuBridge {
       const imageKey = uploadJson.data?.image_key;
       if (uploadJson.code !== 0 || !imageKey) return false;
 
-      // 3. Send image message to chatId
+      const threadCtx = this.getActiveThreadTarget(chatId);
+      if (threadCtx?.rootId && threadCtx.messageId) {
+        try {
+          await this.client.im.message.reply({
+            path: { message_id: threadCtx.messageId },
+            data: {
+              msg_type: 'image',
+              content: JSON.stringify({ image_key: imageKey }),
+              reply_in_thread: true
+            }
+          });
+          return true;
+        } catch {
+          // fallback to create
+        }
+      }
+
       await this.client.im.message.create({
         params: { receive_id_type: 'chat_id' },
         data: {
@@ -476,8 +770,6 @@ export class FeishuBridge {
 
   async sendFile(chatId: string, filePath: string, fallbackDirs: string[] = []): Promise<boolean> {
     if (!this.client || !chatId || !filePath) return false;
-    const st = this.store.getState().feishu;
-    if (!st.appId || !st.appSecret) return false;
 
     try {
       const raw = filePath.trim();
@@ -494,19 +786,10 @@ export class FeishuBridge {
       if (!found) return false;
 
       const stat = fs.statSync(found);
-      // Feishu im/v1/files max file size is 30MB
       if (stat.size <= 0 || stat.size > 30 * 1024 * 1024) return false;
 
-      const tokenResp = await fetch(
-        'https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal',
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ app_id: st.appId, app_secret: st.appSecret })
-        }
-      );
-      const tokenJson = (await tokenResp.json()) as { code?: number; tenant_access_token?: string };
-      if (tokenJson.code !== 0 || !tokenJson.tenant_access_token) return false;
+      const token = await this.fetchTenantAccessToken();
+      if (!token) return false;
 
       const ext = path.extname(found).toLowerCase();
       const fileType =
@@ -532,7 +815,7 @@ export class FeishuBridge {
 
       const uploadResp = await fetch('https://open.feishu.cn/open-apis/im/v1/files', {
         method: 'POST',
-        headers: { Authorization: `Bearer ${tokenJson.tenant_access_token}` },
+        headers: { Authorization: `Bearer ${token}` },
         body: form
       });
       const uploadJson = (await uploadResp.json()) as {
@@ -541,6 +824,23 @@ export class FeishuBridge {
       };
       const fileKey = uploadJson.data?.file_key;
       if (uploadJson.code !== 0 || !fileKey) return false;
+
+      const threadCtx = this.getActiveThreadTarget(chatId);
+      if (threadCtx?.rootId && threadCtx.messageId) {
+        try {
+          await this.client.im.message.reply({
+            path: { message_id: threadCtx.messageId },
+            data: {
+              msg_type: 'file',
+              content: JSON.stringify({ file_key: fileKey }),
+              reply_in_thread: true
+            }
+          });
+          return true;
+        } catch {
+          // fallback to create
+        }
+      }
 
       await this.client.im.message.create({
         params: { receive_id_type: 'chat_id' },

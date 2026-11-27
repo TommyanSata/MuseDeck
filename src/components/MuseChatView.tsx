@@ -337,7 +337,7 @@ export const MuseChatView: React.FC<MuseChatViewProps> = ({
               <div className="flex min-w-0 items-center gap-2.5">
                 <span
                   className={`inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 text-[11px] font-medium ${
-                    workflowStatus.phase === 'paused_budget'
+                    workflowStatus.phase === 'paused_budget' || workflowStatus.phase === 'paused_quota'
                       ? 'bg-amber-100 text-amber-900'
                       : workflowStatus.phase === 'awaiting_project_approval'
                         ? 'bg-sky-100 text-sky-900'
@@ -363,9 +363,11 @@ export const MuseChatView: React.FC<MuseChatViewProps> = ({
                           ? 'Muse 审阅中'
                           : workflowStatus.phase === 'awaiting_user'
                             ? '等待你验收'
-                            : workflowStatus.phase === 'paused_budget'
-                              ? '预算 / 熔断暂停'
-                              : '已验收结项'}
+                            : workflowStatus.phase === 'paused_quota'
+                              ? '额度冷却等待续跑'
+                              : workflowStatus.phase === 'paused_budget'
+                                ? '预算 / 熔断暂停'
+                                : '已验收结项'}
                 </span>
 
                 {(workflowStatus.pendingProjectProposal?.projectName || workflowStatus.approvedProjectName) && (
@@ -412,6 +414,14 @@ export const MuseChatView: React.FC<MuseChatViewProps> = ({
                   >
                     <Check className="h-3 w-3" />
                     批准并开工
+                  </button>
+                )}
+                {workflowStatus.phase === 'paused_quota' && (
+                  <button
+                    onClick={() => void window.fmc.retryWorkflowQuota()}
+                    className="rounded-lg bg-[#18181b] px-2.5 py-1 text-[11px] font-medium text-white hover:bg-[#27272a]"
+                  >
+                    立即重试续跑
                   </button>
                 )}
                 {workflowStatus.phase === 'paused_budget' && (
@@ -629,6 +639,14 @@ export const MuseChatView: React.FC<MuseChatViewProps> = ({
                         systemCapsuleLabel = '✅ 已向 Muse 同步确认项目归属';
                       } else if (rawMsgText.startsWith('【用户已批准执行方案】')) {
                         systemCapsuleLabel = '✅ 已向 Muse 同步批准执行方案';
+                      } else if (
+                        rawMsgText.startsWith('【⚡ CLI 额度触顶') ||
+                        rawMsgText.startsWith('【额度恢复自动续跑】') ||
+                        rawMsgText.startsWith('【额度冷却结束')
+                      ) {
+                        systemCapsuleLabel = '⚡ 检测到 CLI 限额，已自动触发跨工具无缝接力 / 续跑';
+                      } else if (rawMsgText.startsWith('【飞书后台可视化导航代配任务')) {
+                        systemCapsuleLabel = '🤖 已委派 Muse 智能接管飞书配置（本地隐私护盾已开启 · 零密钥接触）';
                       }
                     } else if (
                       m.role === 'muse' &&
@@ -678,6 +696,8 @@ export const MuseChatView: React.FC<MuseChatViewProps> = ({
                       fromFeishuBadge = true;
                       displayUserText = displayUserText
                         .replace(/^【来自手机飞书的(?:新需求|消息)】/, '')
+                        .replace(/^（飞书话题串\s*#[^）]+）/, '')
+                        .replace(/\n【附带飞书截图已同步粘贴[\s\S]*$/, '')
                         .replace(/\n（(?:请先调用|若这是联网查资料)[\s\S]*$/, '')
                         .trim();
                     }

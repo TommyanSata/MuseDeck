@@ -30,6 +30,7 @@ export interface FmcApi {
   approvePlan: () => Promise<import('./types').WorkflowRunState>;
   approveWorkflow: () => Promise<import('./types').WorkflowRunState>;
   resumeWorkflowBudget: (extraTokens?: number) => Promise<import('./types').WorkflowRunState>;
+  retryWorkflowQuota: () => Promise<import('./types').WorkflowRunState>;
   sendWorkflowFeedback: (text: string) => Promise<import('./types').WorkflowRunState>;
   resetWorkflow: () => Promise<import('./types').WorkflowRunState>;
   performCloseAction: (action: 'tray' | 'quit', remember: boolean) => Promise<boolean>;
@@ -150,6 +151,10 @@ export interface FmcApi {
     botDesc?: string;
     existingAppId?: string;
   }) => Promise<import('./types').FeishuAutoPilotResult>;
+  runMuseFeishuCoPilot: (params?: {
+    botName?: string;
+    botDesc?: string;
+  }) => Promise<{ ok: boolean; needLogin?: boolean; needTunnel?: boolean; message: string }>;
   getWhatsNew: () => Promise<import('./types').WhatsNewInfo>;
   ackWhatsNew: () => Promise<FmcState>;
   checkAppUpdate: () => Promise<import('./types').AppUpdateCheckResult>;
