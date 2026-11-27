@@ -16,6 +16,12 @@ import {
   WebContentsView
 } from 'electron';
 import { BenchmarkManager } from './benchmarkManager';
+import {
+  detectMuseChromeExtension,
+  launchMuseExtensionHost,
+  LocalBrowserController,
+  runFeishuLocalAutoPilot
+} from './browserAutoPilot';
 import { CliRunner, DispatchRequest, RunningTaskInfo } from './cliRunner';
 import {
   checkCliUpdates,
@@ -50,6 +56,8 @@ let tunnel: TunnelManager;
 let workflow: WorkflowManager;
 let benchmarks: BenchmarkManager;
 let quotas: QuotaManager;
+let localBrowser: LocalBrowserController;
+let feishuPopupWin: BrowserWindow | null = null;
 let cachedClis: DetectedCli[] | null = null;
 
 const embeddedViews: Record<'feishu' | 'muse', WebContentsView | null> = {
@@ -2280,6 +2288,68 @@ function registerIpcHandlers(): void {
     return next;
   });
 
+  ipcMain.handle('browser:getExtensionStatus', () => {
+    return detectMuseChromeExtension();
+  });
+
+  ipcMain.handle('browser:launchExtensionHost', async (_ev, openStore = false) => {
+    return launchMuseExtensionHost(Boolean(openStore));
+  });
+
+  ipcMain.handle('browser:openLocalControlled', (_ev, url?: string) => {
+    return localBrowser.showWindow(url);
+  });
+
+  ipcMain.handle(
+    'autopilot:feishu',
+    async (
+      _ev,
+      params?: { botName?: string; botDesc?: string; existingAppId?: string }
+    ) => {
+      let targetWc: Electron.WebContents;
+      if (activeEmbedded === 'feishu' && embeddedViews.feishu && !embeddedViews.feishu.webContents.isDestroyed()) {
+        targetWc = embeddedViews.feishu.webContents;
+      } else {
+        if (!feishuPopupWin || feishuPopupWin.isDestroyed()) {
+          feishuPopupWin = new BrowserWindow({
+            width: 1080,
+            height: 760,
+            title: 'MuseDeck · 飞书开放平台本地一键代配助手（扫码登录后全程自动填表）',
+            autoHideMenuBar: true,
+            webPreferences: {
+              partition: 'persist:feishu',
+              contextIsolation: true,
+              nodeIntegration: false,
+              sandbox: true
+            }
+          });
+          feishuPopupWin.on('closed', () => {
+            feishuPopupWin = null;
+          });
+          await feishuPopupWin.loadURL('https://open.feishu.cn/app');
+        } else {
+          feishuPopupWin.show();
+          feishuPopupWin.focus();
+        }
+        targetWc = feishuPopupWin.webContents;
+      }
+
+      return runFeishuLocalAutoPilot({
+        wc: targetWc,
+        botName: params?.botName,
+        botDesc: params?.botDesc,
+        existingAppId: params?.existingAppId,
+        onProgress: (msg) => {
+          broadcast('autopilot:feishuProgress', { message: msg });
+        },
+        onCredentialsReady: async (extractedAppId, extractedSecret) => {
+          const status = await feishu.connect(extractedAppId, extractedSecret);
+          return status.state === 'connected';
+        }
+      });
+    }
+  );
+
   ipcMain.handle('feishu:sendTest', async (_ev, text: string) => {
     const chatId = store.getState().feishu.lastChatId || '';
     if (!chatId) return false;
@@ -2601,6 +2671,7 @@ app.whenReady().then(async () => {
   benchmarks = new BenchmarkManager();
   benchmarks.startDailyScheduler(store.getState().workflow?.autoFetchBenchmarks !== false);
   quotas = new QuotaManager(store);
+  localBrowser = new LocalBrowserController();
   controlServer = new ControlServer(
     store,
     runner,
@@ -2615,18 +2686,30 @@ app.whenReady().then(async () => {
         label: opt
       }));
       deliverProactiveMuseThought(proactivePayload.text, syntheticActions);
-    }
+    },
+    localBrowser
   );
   tunnel = new TunnelManager(
     store,
     (status) => {
       broadcast('tunnel:status', status);
-      if (status.state === 'running' && status.url && status.url !== lastPushedTunnelUrl) {
-        lastPushedTunnelUrl = status.url;
-        scheduleBriefAutoSync(2000);
+      if (status.state === 'running') {
+        localBrowser?.closeTailscaleWindowSoon();
+        if (status.url && status.url !== lastPushedTunnelUrl) {
+          lastPushedTunnelUrl = status.url;
+          scheduleBriefAutoSync(2000);
+        }
       }
     },
-    () => broadcast('state:changed', store.getState())
+    () => broadcast('state:changed', store.getState()),
+    (authUrl) => {
+      localBrowser?.openTailscaleAutoAuthWindow(authUrl, (msg) => {
+        broadcast('tunnel:status', {
+          ...tunnel.getStatus(),
+          message: msg
+        });
+      });
+    }
   );
 
   await controlServer.start();
@@ -2667,6 +2750,11 @@ app.on('before-quit', () => {
     tray.destroy();
     tray = null;
   }
+  if (feishuPopupWin && !feishuPopupWin.isDestroyed()) {
+    feishuPopupWin.destroy();
+    feishuPopupWin = null;
+  }
+  localBrowser?.destroyAll();
   tunnel?.stop();
   feishu?.disconnect();
   controlServer?.stop();

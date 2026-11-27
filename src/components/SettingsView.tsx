@@ -17,6 +17,7 @@ import {
   FmcState,
   ModelRoutingMode,
   MuseDisplayMode,
+  MuseExtensionStatus,
   PlanApprovalMode,
   WorkflowConfig,
   WorkflowReviewMode
@@ -191,11 +192,14 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [newHabit, setNewHabit] = useState('');
   const [benchCache, setBenchCache] = useState<BenchmarkCache | null>(null);
   const [refreshingBench, setRefreshingBench] = useState(false);
+  const [extStatus, setExtStatus] = useState<MuseExtensionStatus | null>(null);
+  const [extMsg, setExtMsg] = useState('');
   const previewVideoRef = useRef<HTMLVideoElement | null>(null);
   const previewImgRef = useRef<HTMLImageElement | null>(null);
 
   React.useEffect(() => {
     void window.fmc.getBenchmarks().then(setBenchCache).catch(() => {});
+    void window.fmc.getMuseExtensionStatus().then(setExtStatus).catch(() => {});
   }, []);
 
   const settings: AppSettings = {
@@ -368,7 +372,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           <Sliders className="h-4 w-4 text-[#52525b]" />
           <h2 className="text-[13.5px] font-semibold text-[#111827]">软件设置</h2>
         </div>
-        <span className="font-mono text-[11px] text-[#8a8f98]">MuseDeck v0.5.1</span>
+        <span className="font-mono text-[11px] text-[#8a8f98]">MuseDeck v0.6.0</span>
       </header>
 
       <div className="flex-1 overflow-y-auto px-6 py-6">
@@ -1111,11 +1115,69 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             </div>
 
             <div className="divide-y divide-[#f1f1f3]">
+              {/* Official Chrome Extension + Built-in Local Browser */}
+              <div className="px-5 py-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <div className="flex items-center gap-2 font-medium text-[#111827]">
+                      <span>本机真实 IP 浏览器双通道（官方 Chrome 插件 + 内置浏览器）</span>
+                      <span
+                        className={`rounded-full px-2 py-0.5 text-[10.5px] font-semibold ${
+                          extStatus?.installed
+                            ? 'bg-emerald-100 text-emerald-800'
+                            : 'bg-[#f4f4f5] text-[#52525b]'
+                        }`}
+                      >
+                        {extStatus?.installed
+                          ? `已检测到 ${extStatus.browser === 'edge' ? 'Edge' : 'Chrome'} 插件 v${extStatus.version}`
+                          : '内置本地浏览器已就绪'}
+                      </span>
+                    </div>
+                    <div className="mt-0.5 text-[11.5px] text-[#71717a]">
+                      防止云端机房 IP 风控：唤醒本机 Chrome 官方「Muse from Meta」插件或使用内置受控本地浏览器（<code className="font-mono">/api/v1/browser/*</code>），全程走本机网络与登录态
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const r = await window.fmc.launchMuseExtensionHost(!extStatus?.installed);
+                        setExtStatus(r.status);
+                        setExtMsg(r.message);
+                      }}
+                      className="inline-flex items-center gap-1.5 rounded-xl bg-[#18181b] px-3 py-1.5 text-[12px] font-medium text-white transition-colors hover:bg-[#27272a]"
+                    >
+                      {extStatus?.installed ? '唤醒本机 Chrome 插件' : '安装官方 Muse 插件'}
+                    </button>
+                    {extStatus?.installed && (
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          const r = await window.fmc.launchMuseExtensionHost(true);
+                          setExtMsg(r.message);
+                        }}
+                        className="rounded-xl border border-[#e4e4e7] bg-white px-2.5 py-1.5 text-[11.5px] font-medium text-[#52525b] hover:bg-[#f4f4f5]"
+                      >
+                        插件商店页
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => void window.fmc.openLocalControlledBrowser()}
+                      className="rounded-xl border border-[#e4e4e7] bg-white px-3 py-1.5 text-[12px] font-medium text-[#3f3f46] hover:bg-[#f4f4f5]"
+                    >
+                      打开内置本地浏览器
+                    </button>
+                  </div>
+                </div>
+                {extMsg && <p className="mt-2 text-[11.5px] text-[#52525b]">{extMsg}</p>}
+              </div>
+
               <div className="flex items-center justify-between gap-4 px-5 py-4">
                 <div>
                   <div className="font-medium text-[#111827]">启动软件时自动挂起内嵌 Tailscale 永久域名</div>
                   <div className="mt-0.5 text-[11.5px] text-[#71717a]">
-                    纯用户态运行，完全退出 FMC 时自动停止，不驻留系统服务
+                    纯用户态运行，完全退出 MuseDeck 时自动停止，不驻留系统服务
                   </div>
                 </div>
                 <button

@@ -9,6 +9,7 @@ import {
   Loader2,
   RefreshCw,
   Send,
+  Sparkles,
   Unplug,
   X,
   XCircle
@@ -30,6 +31,9 @@ export const BridgeView: React.FC<BridgeViewProps> = ({ state, feishuStatus }) =
   const [copied, setCopied] = useState('');
   const [testMsg, setTestMsg] = useState('你好，这是来自 MuseDeck 桌面端的飞书测试推送！');
   const [showGuide, setShowGuide] = useState(false);
+  const [botNameDraft, setBotNameDraft] = useState('MuseDeck');
+  const [autoRunning, setAutoRunning] = useState(false);
+  const [autoTip, setAutoTip] = useState('');
 
   useEffect(() => {
     void window.fmc.getTunnelStatus().then((st) => {
@@ -41,7 +45,14 @@ export const BridgeView: React.FC<BridgeViewProps> = ({ state, feishuStatus }) =
       setTunnelStatus(st);
       if (st.url) setTunnelUrl(st.url);
     });
-    return () => off();
+    const offAuto = window.fmc.onEvent('autopilot:feishuProgress', (payload) => {
+      const p = payload as { message?: string };
+      if (p?.message) setAutoTip(p.message);
+    });
+    return () => {
+      off();
+      offAuto();
+    };
   }, []);
 
   const handleToggleTunnel = async () => {
@@ -165,6 +176,54 @@ export const BridgeView: React.FC<BridgeViewProps> = ({ state, feishuStatus }) =
               </div>
 
               <div className="space-y-3 text-[12.5px]">
+                {/* One-Click Local Feishu Auto-Pilot */}
+                <div className="rounded-xl border border-[#eaecef] bg-[#fafafa] p-3">
+                  <div className="text-[11.5px] font-semibold text-[#111827]">
+                    ⚡ 扫码后一键自动代配飞书机器人（走本机 IP）
+                  </div>
+                  <div className="mt-0.5 text-[11px] text-[#71717a]">
+                    弹出本地开放平台窗口，手机飞书扫码登录后再点一次即可自动建应用、导权限并提取凭证连接
+                  </div>
+                  <div className="mt-2 flex gap-2">
+                    <input
+                      value={botNameDraft}
+                      onChange={(e) => setBotNameDraft(e.target.value)}
+                      placeholder="机器人名称（如 MuseDeck）"
+                      className="min-w-0 flex-1 rounded-lg border border-[#e4e4e7] bg-white px-2.5 py-1.5 text-[12px] outline-none focus:border-[#18181b]"
+                    />
+                    <button
+                      type="button"
+                      disabled={autoRunning}
+                      onClick={async () => {
+                        setAutoRunning(true);
+                        setAutoTip('正在打开本地飞书开放平台助手...');
+                        try {
+                          const r = await window.fmc.runFeishuAutoPilot({
+                            botName: botNameDraft,
+                            existingAppId: appId.trim() || undefined
+                          });
+                          if (r.appId) setAppId(r.appId);
+                          if (r.appSecret) setAppSecret(r.appSecret);
+                          setAutoTip(r.message);
+                        } finally {
+                          setAutoRunning(false);
+                        }
+                      }}
+                      className="inline-flex shrink-0 items-center gap-1 rounded-lg bg-[#18181b] px-3 py-1.5 text-[11.5px] font-medium text-white hover:bg-[#27272a] disabled:opacity-50"
+                    >
+                      {autoRunning ? (
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                      ) : (
+                        <Sparkles className="h-3 w-3" />
+                      )}
+                      {autoRunning ? '自动代配中...' : '一键自动代配'}
+                    </button>
+                  </div>
+                  {autoTip && (
+                    <p className="mt-1.5 text-[11px] leading-relaxed text-[#3f3f46]">{autoTip}</p>
+                  )}
+                </div>
+
                 <div>
                   <label className="mb-1 block font-medium text-[#3f3f46]">App ID</label>
                   <input

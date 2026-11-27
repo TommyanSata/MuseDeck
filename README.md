@@ -42,7 +42,7 @@ Modern developers often run **multiple local AI coding CLIs** at the same time â
 | **Multi-CLI Radar & Manager** | One-click install/update/uninstall, live local model scanning, CC-Switch style provider presets, latency testing, 5-tier reasoning effort slider, custom roles & `0â€“5` per-role weights. |
 | **Per-Project CLI Whitelist & History Resume** | Right-click any project to restrict allowed CLIs, edit metadata, or scan & import local `~/.codex` / `~/.claude` sessions with native `--resume` continuation. |
 | **Quota & Balance Awareness** | Reads Codex native `rate_limits`, tracks rolling 5h/7d/30d local token usage, and queries metered balances for DeepSeek, OpenRouter, NewAPI/OneAPI, Kimi, or custom URLs. |
-| **Embedded Tailscale Funnel** | Built-in pure-userspace `tsnet` sidecar exposes your local Control API over HTTPS 443 with Bearer token auth so Meta Muse can orchestrate local CLIs reliably. |
+| **Embedded Tailscale Funnel & Local Auto-Pilot** | Built-in userspace `tsnet` sidecar with automated `Connect / Enable Funnel` clicker, one-click Feishu Open Platform bot configurator, official **Muse from Meta** Chrome extension linkage, and a local-IP `/api/v1/browser/*` engine to avoid cloud IP blocks. |
 | **Remote File Search & Feishu Attachments** | Safe allowlisted directory search/read (`Projects / Desktop / Documents / Downloads`, blocking `.ssh` & `.env`) and direct Feishu file transfer up to 30 MB. |
 
 ---

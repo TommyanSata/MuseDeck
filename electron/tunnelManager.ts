@@ -20,17 +20,20 @@ export class TunnelManager {
   private store: FmcStore;
   private onStatus: (status: TunnelStatusPayload) => void;
   private onStateChanged: () => void;
+  private onAuthUrl?: (url: string, eventType: string) => void;
   private proc: ChildProcess | null = null;
   private currentStatus: TunnelStatusPayload = { state: 'stopped' };
 
   constructor(
     store: FmcStore,
     onStatus: (status: TunnelStatusPayload) => void,
-    onStateChanged: () => void
+    onStateChanged: () => void,
+    onAuthUrl?: (url: string, eventType: string) => void
   ) {
     this.store = store;
     this.onStatus = onStatus;
     this.onStateChanged = onStateChanged;
+    this.onAuthUrl = onAuthUrl;
   }
 
   getStatus(): TunnelStatusPayload {
@@ -153,7 +156,7 @@ export class TunnelManager {
 
     return new Promise((resolve) => {
       let settled = false;
-      let openedAuth = false;
+      const seenAuthUrls = new Set<string>();
       let buf = '';
 
       const child = spawn(
@@ -173,15 +176,21 @@ export class TunnelManager {
         try {
           const ev = JSON.parse(trimmed) as { event?: string; url?: string; message?: string };
           if (ev.event === 'auth_url' || ev.event === 'funnel_enable') {
-            if (ev.url && !openedAuth) {
-              openedAuth = true;
-              void shell.openExternal(ev.url);
+            if (ev.url && !seenAuthUrls.has(ev.url)) {
+              seenAuthUrls.add(ev.url);
+              if (this.onAuthUrl) {
+                this.onAuthUrl(ev.url, ev.event);
+              } else {
+                void shell.openExternal(ev.url);
+              }
             }
             this.setStatus({
               state: 'starting',
               mode: 'tailscale',
               authUrl: ev.url,
-              message: ev.message || '请在弹出的浏览器页面完成一次 Tailscale 授权'
+              message:
+                ev.message ||
+                '已弹出本地自动授权窗口：登录账号后将自动为你点击 Connect / Enable Funnel'
             });
           } else if (ev.event === 'waiting_funnel') {
             this.setStatus({

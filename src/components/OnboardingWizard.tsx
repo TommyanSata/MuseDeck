@@ -21,6 +21,7 @@ import {
   FeishuStatusEvent,
   FmcState,
   ModelRoutingMode,
+  MuseExtensionStatus,
   PermissionLevel,
   PlanApprovalMode,
   TunnelStatusEvent,
@@ -128,11 +129,25 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
     state.workflow?.quietHoursEnabled !== false
   );
 
-  // Step 5 Muse pre-flight permission handshake states
+  // Step 2 Feishu Auto-Pilot & Step 5 Muse pre-flight states
+  const [botNameDraft, setBotNameDraft] = useState('MuseDeck');
+  const [runningFeishuAuto, setRunningFeishuAuto] = useState(false);
+  const [feishuAutoTip, setFeishuAutoTip] = useState('');
+  const [extStatus, setExtStatus] = useState<MuseExtensionStatus | null>(null);
+  const [extTip, setExtTip] = useState('');
   const [testingPerm, setTestingPerm] = useState(false);
   const [permTip, setPermTip] = useState('');
   const [syncingAvatar, setSyncingAvatar] = useState(false);
   const [avatarTip, setAvatarTip] = useState('');
+
+  useEffect(() => {
+    void window.fmc.getMuseExtensionStatus().then(setExtStatus);
+    const offFeishuAuto = window.fmc.onEvent('autopilot:feishuProgress', (payload) => {
+      const p = payload as { message?: string };
+      if (p?.message) setFeishuAutoTip(p.message);
+    });
+    return () => offFeishuAuto();
+  }, []);
 
   useEffect(() => {
     void window.fmc.getTunnelStatus().then((st) => {
@@ -183,6 +198,23 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
       await window.fmc.connectFeishu(appId, appSecret);
     } finally {
       setConnecting(false);
+    }
+  };
+
+  const handleRunFeishuAutoPilot = async () => {
+    if (runningFeishuAuto) return;
+    setRunningFeishuAuto(true);
+    setFeishuAutoTip('正在检查左侧飞书开放平台登录态并启动本地自动代配...');
+    try {
+      const res = await window.fmc.runFeishuAutoPilot({
+        botName: botNameDraft,
+        existingAppId: appId.trim() || undefined
+      });
+      if (res.appId) setAppId(res.appId);
+      if (res.appSecret) setAppSecret(res.appSecret);
+      setFeishuAutoTip(res.message);
+    } finally {
+      setRunningFeishuAuto(false);
     }
   };
 
@@ -379,6 +411,45 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
 
             <div className="col-span-5 flex h-full flex-col overflow-hidden bg-[#fafafa]">
               <div className="flex-1 space-y-4 overflow-y-auto p-5">
+                {/* One-Click Local Feishu Auto-Pilot Card */}
+                <section className="rounded-2xl border border-[#18181b] bg-white p-4 shadow-2xs">
+                  <div className="flex items-center justify-between gap-2">
+                    <h2 className="flex items-center gap-1.5 text-[13px] font-semibold text-[#111827]">
+                      <Sparkles className="h-3.5 w-3.5 text-amber-500" />
+                      扫码后一键本地自动代配（走本机 IP · 0 对话污染）
+                    </h2>
+                  </div>
+                  <p className="mt-1 text-[11px] leading-relaxed text-[#52525b]">
+                    先在左侧用手机飞书<strong>扫码登录开放平台</strong>（确认右上角企业与手机飞书一致），填好下方机器人名称后点按钮，自动帮你建应用、开机器人、导 7 项权限、抓凭证连长连接并打开版本发布页：
+                  </p>
+                  <div className="mt-2.5 flex gap-2">
+                    <input
+                      value={botNameDraft}
+                      onChange={(e) => setBotNameDraft(e.target.value)}
+                      placeholder="新机器人名称（如 MuseDeck）"
+                      className="min-w-0 flex-1 rounded-xl border border-[#e4e4e7] bg-[#fafafa] px-3 py-1.5 text-[12px] text-[#111827] outline-none focus:border-[#18181b] focus:bg-white"
+                    />
+                    <button
+                      type="button"
+                      disabled={runningFeishuAuto}
+                      onClick={() => void handleRunFeishuAutoPilot()}
+                      className="inline-flex shrink-0 items-center gap-1.5 rounded-xl bg-[#18181b] px-3.5 py-1.5 text-[12px] font-medium text-white transition-colors hover:bg-[#27272a] disabled:opacity-50"
+                    >
+                      {runningFeishuAuto ? (
+                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      ) : (
+                        <Sparkles className="h-3.5 w-3.5" />
+                      )}
+                      {runningFeishuAuto ? '自动配置中...' : '⚡ 一键自动代配'}
+                    </button>
+                  </div>
+                  {feishuAutoTip && (
+                    <div className="mt-2 rounded-xl border border-[#eaecef] bg-[#fafafa] px-3 py-2 text-[11px] leading-relaxed text-[#3f3f46]">
+                      {feishuAutoTip}
+                    </div>
+                  )}
+                </section>
+
                 <section className="rounded-2xl border border-[#eaecef] bg-white p-4">
                   <div className="mb-3 flex items-center justify-between">
                     <h2 className="text-[13.5px] font-semibold text-[#111827]">飞书机器人凭证</h2>
@@ -990,26 +1061,20 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
                 {/* Detailed Step-by-Step Tailscale Webpage Guide */}
                 <section className="rounded-2xl border border-[#eaecef] bg-white p-5">
                   <h3 className="text-[13px] font-semibold text-[#111827]">
-                    Tailscale 跳转网页后该怎么操作？（仅首次需操作 1 次，之后永久免操作）
+                    Tailscale 自动授权说明（已内置本地自动点击助手！）
                   </h3>
                   <ol className="mt-2.5 list-decimal space-y-2 pl-4 text-[12px] leading-relaxed text-[#52525b]">
                     <li>
-                      <strong>第 1 个网页（登录并绑定设备）：</strong>点击上方启动按钮后，浏览器会打开{' '}
-                      <code className="rounded bg-[#f4f4f5] px-1">login.tailscale.com/a/...</code>。使用你的{' '}
-                      <strong>Google / GitHub / Microsoft</strong> 账号直接登录（没有账号会自动免费注册个人版），随后点击页面中央的蓝色{' '}
-                      <strong>「Connect」</strong> 按钮，将 <code className="rounded bg-[#f4f4f5] px-1">fmc-hub</code> 接入你的账号。
+                      <strong>自动弹出本地授权窗口（走本机 IP）：</strong>点击上方启动按钮后，MuseDeck 会弹出专属授权窗口打开{' '}
+                      <code className="rounded bg-[#f4f4f5] px-1">login.tailscale.com</code>。你只需使用{' '}
+                      <strong>Google / GitHub / Microsoft</strong> 登录一次，窗口内置助手会<strong>自动为你点击「Connect」与「Enable Funnel」</strong>！
                     </li>
                     <li>
-                      <strong>第 2 个网页（开启 Funnel 公网转发，仅全新账号会弹出）：</strong>绑定后如果浏览器紧接着弹出第二个页面（或上方出现新的授权链接{' '}
-                      <code className="rounded bg-[#f4f4f5] px-1">.../f/funnel</code>），点击页面上的{' '}
-                      <strong>「Enable Funnel」</strong> 按钮开启 443 公网访问。
-                      <div className="mt-1 rounded-lg bg-[#fafafa] px-2.5 py-1.5 text-[11px] text-[#71717a]">
-                        小贴士：如果页面提示需先启用 HTTPS 证书，点击进入 Tailscale 后台顶部的 <strong>DNS</strong> 标签页，滑到底部勾选开启{' '}
-                        <strong>MagicDNS</strong> 与 <strong>Enable HTTPS</strong> 即可。
-                      </div>
+                      <strong>首次若提示需先开 HTTPS：</strong>若页面提示需启用 HTTPS 证书，进入顶部 <strong>DNS</strong> 标签页，滑到底部勾选开启{' '}
+                      <strong>MagicDNS</strong> 与 <strong>Enable HTTPS</strong> 即可。
                     </li>
                     <li>
-                      <strong>自动回填生效：</strong>网页上点完后无需重启软件，等待约 3~8 秒申请免费 TLS 证书，本页上方就会自动变成绿色「<strong>永久域名已在线</strong>」并填好你的专属 <code className="rounded bg-[#f4f4f5] px-1">.ts.net</code> 地址！
+                      <strong>自动回填并关闭窗口：</strong>授权通过后约 3~8 秒自动获取专属 <code className="rounded bg-[#f4f4f5] px-1">.ts.net</code> 永久域名并自动关闭授权小窗！
                     </li>
                   </ol>
                 </section>
@@ -1190,6 +1255,53 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
                       </span>
                     )}
                   </div>
+                </section>
+
+                {/* Card 3: Official "Muse from Meta" Local Chrome Extension Co-Op + Built-in Local Browser */}
+                <section className="rounded-2xl border border-[#eaecef] bg-white p-4">
+                  <div className="flex items-center justify-between gap-2">
+                    <h2 className="text-[13px] font-semibold text-[#111827]">
+                      3. 本地真实 IP 浏览器联动（防云端 IP 风控 · 可选增强）
+                    </h2>
+                    <span
+                      className={`rounded-full px-2 py-0.5 text-[10.5px] font-semibold ${
+                        extStatus?.installed
+                          ? 'bg-emerald-100 text-emerald-800'
+                          : 'bg-[#f4f4f5] text-[#52525b]'
+                      }`}
+                    >
+                      {extStatus?.installed
+                        ? `已装官方插件 v${extStatus.version || ''}`
+                        : '内置本地浏览器已就绪'}
+                    </span>
+                  </div>
+                  <p className="mt-1 text-[11px] leading-relaxed text-[#52525b]">
+                    {extStatus?.installed
+                      ? `已检测到你本机 ${extStatus.browser === 'edge' ? 'Edge' : 'Chrome'} 安装了官方「Muse from Meta」插件！唤醒后 Muse 可直接用你本机浏览器与已登录账号操作网页；同时 MuseDeck 也内置了受控本地浏览器 API 双保险。`
+                      : 'MuseDeck 已内置本地 IP 浏览器接口供 Muse 调用；你也可以在本机 Chrome 安装官方「Muse from Meta」扩展，让 Muse 直接操作你的日常 Chrome 标签组。'}
+                  </p>
+                  <div className="mt-2.5 flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const r = await window.fmc.launchMuseExtensionHost(!extStatus?.installed);
+                        setExtStatus(r.status);
+                        setExtTip(r.message);
+                      }}
+                      className="inline-flex items-center gap-1.5 rounded-xl bg-[#18181b] px-3 py-1.5 text-[11.5px] font-medium text-white hover:bg-[#27272a]"
+                    >
+                      <ExternalLink className="h-3 w-3" />
+                      {extStatus?.installed ? '唤醒本机 Chrome 官方插件' : '前往安装官方 Muse 插件'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void window.fmc.openLocalControlledBrowser()}
+                      className="inline-flex items-center gap-1 rounded-xl border border-[#e4e4e7] bg-[#fafafa] px-2.5 py-1.5 text-[11.5px] font-medium text-[#3f3f46] hover:bg-[#f4f4f5]"
+                    >
+                      打开内置本地浏览器
+                    </button>
+                  </div>
+                  {extTip && <p className="mt-1.5 text-[11px] text-[#52525b]">{extTip}</p>}
                 </section>
               </div>
 

@@ -93,6 +93,13 @@ contextBridge.exposeInMainWorld('fmc', {
   mutateOpenQuestion: (payload: Record<string, unknown>) =>
     ipcRenderer.invoke('questions:mutate', payload),
   deleteResearchNote: (id: string) => ipcRenderer.invoke('research:delete', id),
+  getMuseExtensionStatus: () => ipcRenderer.invoke('browser:getExtensionStatus'),
+  launchMuseExtensionHost: (openStore?: boolean) =>
+    ipcRenderer.invoke('browser:launchExtensionHost', openStore),
+  openLocalControlledBrowser: (url?: string) =>
+    ipcRenderer.invoke('browser:openLocalControlled', url),
+  runFeishuAutoPilot: (params?: { botName?: string; botDesc?: string; existingAppId?: string }) =>
+    ipcRenderer.invoke('autopilot:feishu', params),
 
   // Built-in Embedded Tailscale, Serveo 443, Cloudflare & SSH Reverse Tunnel
   getTunnelStatus: () => ipcRenderer.invoke('tunnel:status'),

@@ -408,3 +408,23 @@ export interface ModelScanResult {
   sources: string[];
   error?: string;
 }
+
+export interface MuseExtensionStatus {
+  installed: boolean;
+  extensionId: string;
+  storeUrl: string;
+  browser?: 'chrome' | 'edge';
+  profileDir?: string;
+  version?: string;
+  executablePath?: string;
+}
+
+export interface FeishuAutoPilotResult {
+  ok: boolean;
+  needLogin?: boolean;
+  appId?: string;
+  appSecret?: string;
+  completedSteps: string[];
+  nextManualHint?: string;
+  message: string;
+}

@@ -138,6 +138,18 @@ export interface FmcApi {
     resolution?: string;
   }) => Promise<FmcState>;
   deleteResearchNote: (id: string) => Promise<FmcState>;
+  getMuseExtensionStatus: () => Promise<import('./types').MuseExtensionStatus>;
+  launchMuseExtensionHost: (openStore?: boolean) => Promise<{
+    ok: boolean;
+    message: string;
+    status: import('./types').MuseExtensionStatus;
+  }>;
+  openLocalControlledBrowser: (url?: string) => Promise<{ ok: boolean; url: string }>;
+  runFeishuAutoPilot: (params?: {
+    botName?: string;
+    botDesc?: string;
+    existingAppId?: string;
+  }) => Promise<import('./types').FeishuAutoPilotResult>;
 
   getTunnelStatus: () => Promise<TunnelStatusEvent>;
   startTailscaleTunnel: () => Promise<TunnelStatusEvent>;

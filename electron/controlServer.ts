@@ -5,6 +5,7 @@ import path from 'path';
 import { session } from 'electron';
 import { URL } from 'url';
 import { BenchmarkManager } from './benchmarkManager';
+import { detectMuseChromeExtension, LocalBrowserController } from './browserAutoPilot';
 import { CliRunner } from './cliRunner';
 import { DetectedCli, scanCliModels, scanLocalClis } from './cliScanner';
 import { FeishuBridge } from './feishuBridge';
@@ -243,6 +244,11 @@ ${openQuestionsBlock}
 17. **【静默云端维护（严禁在对话中播报）】**：
    - 所有最新配置变更（100% 权重、启用 CLI、审批模式、未决议题）都会随每次接口 JSON 的 \`_livePolicy\` 字段实时下发，请直接以 \`_livePolicy\` 为准，无需用户重发协议。
    - 若接口 JSON 中附带 \`_silentCloudTasks\`（如更新评测榜单 \`POST /api/v1/benchmarks/update\`、补全未知模型能力画像 \`POST /api/v1/clis/model-profiles\`、补全 CLI 最新版本号 \`POST /api/v1/clis/updates-cache\`），请在工具调用阶段利用你的云端能力顺手静默 \`POST\` 回写，**严禁在给用户的聊天回复里提及这些后台缓存维护动作，确保对话 100% 纯净无冗余**！
+18. **【本机真实 IP 浏览器双通道（防云端 IP 风控 & 复用本地登录态）】**：
+   - 遇到对云端机房 IP 敏感或需复用本地登录态的网页时：若 \`_livePolicy.localBrowser.chromeExtensionInstalled\` 为 \`true\` 且用户开启了本机 Chrome 官方 \`Muse from Meta\` 插件，优先调用该本地插件；否则可直接静默调用 MuseDeck 内置本地 IP 浏览器接口：
+     - 打开网页并获取可交互快照：\`POST ${baseUrl}/api/v1/browser/open\` Body: \`{"url": "https://..."}\`
+     - 读取当前页面快照：\`GET ${baseUrl}/api/v1/browser/snapshot\`
+     - 点击 / 输入 / 按键 / 滚动：\`POST ${baseUrl}/api/v1/browser/act\` Body: \`{"action": "click" | "fill" | "press" | "scroll", "targetId": "b1", "text": "输入内容"}\`
 
 ## 5. 标准闭环流程（省预算 + 递进式完善）
 1. **先定项目归属**：收到需求后，先查 \`GET /api/v1/projects\` 和 \`GET /api/v1/clis\`，调 \`propose-project\` 确认项目归属；
@@ -259,6 +265,7 @@ export class ControlServer {
   private workflow: WorkflowManager;
   private benchmarks: BenchmarkManager;
   private quotas: QuotaManager;
+  private localBrowser?: LocalBrowserController;
   private onStateChanged: () => void;
   private onProactivePush?: (payload: {
     text: string;
@@ -277,7 +284,8 @@ export class ControlServer {
     benchmarks: BenchmarkManager,
     quotas: QuotaManager,
     onStateChanged: () => void,
-    onProactivePush?: (payload: { text: string; questionId?: string; options?: string[] }) => void
+    onProactivePush?: (payload: { text: string; questionId?: string; options?: string[] }) => void,
+    localBrowser?: LocalBrowserController
   ) {
     this.store = store;
     this.runner = runner;
@@ -287,6 +295,7 @@ export class ControlServer {
     this.quotas = quotas;
     this.onStateChanged = onStateChanged;
     this.onProactivePush = onProactivePush;
+    this.localBrowser = localBrowser;
   }
 
   start(): Promise<number> {
@@ -353,6 +362,7 @@ export class ControlServer {
       });
     }
 
+    const extStatus = detectMuseChromeExtension();
     return {
       _livePolicy: {
         planApprovalMode: wf.planApprovalMode || 'adaptive',
@@ -361,6 +371,12 @@ export class ControlServer {
         reviewMode: wf.reviewMode,
         tokenBudget: wf.tokenBudget,
         cloudResearchFirst: wf.cloudResearchFirst !== false,
+        localBrowser: {
+          chromeExtensionInstalled: extStatus.installed,
+          extensionBrowser: extStatus.browser,
+          extensionVersion: extStatus.version,
+          builtinBrowserApi: '/api/v1/browser/open'
+        },
         enabledClis: enabledCliSummary,
         userHabits: wf.userHabits || [],
         openQuestions: openQs
@@ -1401,6 +1417,58 @@ export class ControlServer {
         quietHoursActive: isWithinQuietHours(this.store.getState().workflow)
       });
       return;
+    }
+
+    // Local-IP Controlled Browser API (prevents cloud datacenter IP blocks & reuses local login cookies)
+    if (this.localBrowser && pathname.startsWith('/api/v1/browser/')) {
+      try {
+        if (req.method === 'GET' && pathname === '/api/v1/browser/status') {
+          this.sendJson(res, 200, this.localBrowser.getStatus());
+          return;
+        }
+        if (req.method === 'GET' && pathname === '/api/v1/browser/snapshot') {
+          const snap = await this.localBrowser.snapshot();
+          this.sendJson(res, 200, snap);
+          return;
+        }
+        if (req.method === 'POST' && pathname === '/api/v1/browser/open') {
+          const body = await this.readBody(req);
+          const url = String(body.url || '').trim();
+          if (!url) {
+            this.sendJson(res, 400, { error: 'Missing required field: url' });
+            return;
+          }
+          const snap = await this.localBrowser.openUrl(
+            url,
+            typeof body.waitMs === 'number' ? body.waitMs : 1800
+          );
+          this.sendJson(res, 200, { ok: true, snapshot: snap });
+          return;
+        }
+        if (req.method === 'POST' && pathname === '/api/v1/browser/act') {
+          const body = await this.readBody(req);
+          const actType = String(body.action || 'click').toLowerCase();
+          if (actType !== 'click' && actType !== 'fill' && actType !== 'press' && actType !== 'scroll') {
+            this.sendJson(res, 400, { error: 'Invalid action; expected click, fill, press, or scroll' });
+            return;
+          }
+          const result = await this.localBrowser.act({
+            action: actType,
+            targetId: body.targetId ? String(body.targetId) : undefined,
+            text: body.text !== undefined ? String(body.text) : undefined,
+            key: body.key ? String(body.key) : undefined,
+            direction:
+              body.direction === 'up' || body.direction === 'top' || body.direction === 'bottom'
+                ? body.direction
+                : 'down'
+          });
+          this.sendJson(res, 200, result);
+          return;
+        }
+      } catch (err) {
+        this.sendJson(res, 400, { error: err instanceof Error ? err.message : String(err) });
+        return;
+      }
     }
 
     this.sendJson(res, 404, { error: `Unknown endpoint: ${pathname}` });
