@@ -310,6 +310,7 @@ export interface AppSettings {
   monoFont: 'system' | 'cascadia' | 'jetbrains' | 'consolas';
   closeBehavior: CloseBehavior;
   launchAtLogin: boolean;
+  checkUpdateOnStartup?: boolean;
   museDisplayMode: MuseDisplayMode;
 }
 
@@ -322,6 +323,7 @@ export interface ModelCapabilityProfile {
 
 export interface FmcState {
   onboardingCompleted: boolean;
+  lastSeenAppVersion?: string;
   permissionLevel: PermissionLevel;
   settings?: AppSettings;
   workflow?: WorkflowConfig;
@@ -434,4 +436,26 @@ export interface FeishuAutoPilotResult {
   stepReport?: FeishuAutoStepReport[];
   nextManualHint?: string;
   message: string;
+}
+
+export interface AppUpdateCheckResult {
+  ok: boolean;
+  currentVersion: string;
+  latestVersion: string;
+  hasUpdate: boolean;
+  releaseTitle?: string;
+  highlights: string[];
+  rawNotes?: string;
+  downloadUrl?: string;
+  htmlUrl: string;
+  publishedAt?: string;
+  checkedAt: string;
+  error?: string;
+}
+
+export interface WhatsNewInfo {
+  currentVersion: string;
+  shouldShow: boolean;
+  title: string;
+  highlights: string[];
 }

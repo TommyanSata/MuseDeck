@@ -100,6 +100,11 @@ contextBridge.exposeInMainWorld('fmc', {
     ipcRenderer.invoke('browser:openLocalControlled', url),
   runFeishuAutoPilot: (params?: { botName?: string; botDesc?: string; existingAppId?: string }) =>
     ipcRenderer.invoke('autopilot:feishu', params),
+  getWhatsNew: () => ipcRenderer.invoke('app:getWhatsNew'),
+  ackWhatsNew: () => ipcRenderer.invoke('app:ackWhatsNew'),
+  checkAppUpdate: () => ipcRenderer.invoke('app:checkUpdate'),
+  downloadAppUpdate: (payload: { downloadUrl: string; version: string; highlights?: string[] }) =>
+    ipcRenderer.invoke('app:downloadUpdate', payload),
 
   // Built-in Embedded Tailscale, Serveo 443, Cloudflare & SSH Reverse Tunnel
   getTunnelStatus: () => ipcRenderer.invoke('tunnel:status'),

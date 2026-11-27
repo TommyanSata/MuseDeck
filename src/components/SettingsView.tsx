@@ -1,16 +1,21 @@
 import React, { useRef, useState } from 'react';
 import {
+  Download,
+  ExternalLink,
   FolderOpen,
   GitBranch,
+  Loader2,
   Monitor,
   Power,
   RefreshCw,
   RotateCcw,
   Sliders,
+  Sparkles,
   Type
 } from 'lucide-react';
 import {
   AppSettings,
+  AppUpdateCheckResult,
   BenchmarkCache,
   CloseBehavior,
   DecisionPriorityWeights,
@@ -29,6 +34,7 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   monoFont: 'system',
   closeBehavior: 'ask',
   launchAtLogin: false,
+  checkUpdateOnStartup: true,
   museDisplayMode: 'avatar'
 };
 
@@ -100,6 +106,9 @@ const DEFAULT_WORKFLOW_CONFIG: WorkflowConfig = {
 
 interface SettingsViewProps {
   state: FmcState;
+  availableUpdate?: AppUpdateCheckResult | null;
+  onUpdateDetected?: (res: AppUpdateCheckResult) => void;
+  onShowWhatsNew?: () => void;
   onUpdateSettings: (patch: Partial<AppSettings>) => Promise<void>;
   onUpdateControlApi: (patch: { autoStartTunnel?: boolean; autoSyncToMuse?: boolean }) => Promise<void>;
   onUpdateWorkflowConfig: (patch: Partial<WorkflowConfig>) => Promise<void>;
@@ -181,6 +190,9 @@ const MODEL_ROUTING_OPTIONS: Array<{ id: ModelRoutingMode; label: string; desc: 
 
 export const SettingsView: React.FC<SettingsViewProps> = ({
   state,
+  availableUpdate,
+  onUpdateDetected,
+  onShowWhatsNew,
   onUpdateSettings,
   onUpdateControlApi,
   onUpdateWorkflowConfig
@@ -194,12 +206,21 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   const [refreshingBench, setRefreshingBench] = useState(false);
   const [extStatus, setExtStatus] = useState<MuseExtensionStatus | null>(null);
   const [extMsg, setExtMsg] = useState('');
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [updateResult, setUpdateResult] = useState<AppUpdateCheckResult | null>(availableUpdate || null);
+  const [downloadingUpd, setDownloadingUpd] = useState(false);
+  const [dlProgress, setDlProgress] = useState<{ percent: number; transferredMB: string; totalMB: string } | null>(null);
+  const [dlError, setDlError] = useState('');
   const previewVideoRef = useRef<HTMLVideoElement | null>(null);
   const previewImgRef = useRef<HTMLImageElement | null>(null);
 
   React.useEffect(() => {
     void window.fmc.getBenchmarks().then(setBenchCache).catch(() => {});
     void window.fmc.getMuseExtensionStatus().then(setExtStatus).catch(() => {});
+    const offProg = window.fmc.onEvent('app:updateProgress', (payload) => {
+      setDlProgress(payload as { percent: number; transferredMB: string; totalMB: string });
+    });
+    return () => offProg();
   }, []);
 
   const settings: AppSettings = {
@@ -372,7 +393,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           <Sliders className="h-4 w-4 text-[#52525b]" />
           <h2 className="text-[13.5px] font-semibold text-[#111827]">软件设置</h2>
         </div>
-        <span className="font-mono text-[11px] text-[#8a8f98]">MuseDeck v0.6.1</span>
+        <span className="font-mono text-[11px] text-[#8a8f98]">MuseDeck v0.6.2</span>
       </header>
 
       <div className="flex-1 overflow-y-auto px-6 py-6">
@@ -1107,14 +1128,186 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             </div>
           </section>
 
-          {/* Section 3: Background Services & Maintenance */}
+          {/* Section 3: Updates, Background Services & Maintenance */}
           <section className="overflow-hidden rounded-2xl border border-[#eaecef] bg-white">
             <div className="flex items-center gap-2 border-b border-[#eaecef] bg-[#fafafa] px-5 py-3 text-[12px] font-semibold text-[#3f3f46]">
               <Monitor className="h-3.5 w-3.5" />
-              后台服务与数据管理
+              软件更新、后台服务与数据管理
             </div>
 
             <div className="divide-y divide-[#f1f1f3]">
+              {/* Software Version Check & One-Click Update */}
+              <div className="px-5 py-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <div className="flex items-center gap-2 font-medium text-[#111827]">
+                      <span>软件版本与在线更新</span>
+                      <span className="rounded-md bg-[#f4f4f5] px-2 py-0.5 font-mono text-[11px] text-[#52525b]">
+                        v0.6.2
+                      </span>
+                    </div>
+                    <div className="mt-0.5 text-[11.5px] text-[#71717a]">
+                      检测 GitHub 最新发行版，支持一键下载安装包自动升级并查看本版更新说明
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {onShowWhatsNew && (
+                      <button
+                        type="button"
+                        onClick={onShowWhatsNew}
+                        className="inline-flex items-center gap-1 rounded-xl border border-[#e4e4e7] bg-white px-3 py-1.5 text-[12px] font-medium text-[#3f3f46] transition-colors hover:bg-[#f4f4f5] hover:text-[#111827]"
+                      >
+                        <Sparkles className="h-3.5 w-3.5 text-amber-500" />
+                        本版更新内容
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      disabled={checkingUpdate || downloadingUpd}
+                      onClick={async () => {
+                        setCheckingUpdate(true);
+                        setDlError('');
+                        try {
+                          const res = await window.fmc.checkAppUpdate();
+                          setUpdateResult(res);
+                          onUpdateDetected?.(res);
+                        } finally {
+                          setCheckingUpdate(false);
+                        }
+                      }}
+                      className="inline-flex items-center gap-1.5 rounded-xl bg-[#18181b] px-3.5 py-1.5 text-[12px] font-medium text-white transition-colors hover:bg-[#27272a] disabled:opacity-50"
+                    >
+                      <RefreshCw className={`h-3.5 w-3.5 ${checkingUpdate ? 'animate-spin' : ''}`} />
+                      {checkingUpdate ? '正在检测...' : '检查更新'}
+                    </button>
+                  </div>
+                </div>
+
+                {updateResult && (
+                  <div
+                    className={`mt-3 rounded-xl border p-3 text-[12px] ${
+                      updateResult.hasUpdate
+                        ? 'border-emerald-200 bg-emerald-50/60 text-emerald-950'
+                        : updateResult.ok
+                          ? 'border-[#eaecef] bg-[#fafafa] text-[#3f3f46]'
+                          : 'border-red-200 bg-red-50/60 text-red-900'
+                    }`}
+                  >
+                    {updateResult.hasUpdate ? (
+                      <div className="space-y-2">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="font-semibold">
+                            🎉 发现新版本 v{updateResult.latestVersion}（{updateResult.releaseTitle || '可升级'}）
+                          </span>
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => void window.fmc.openExternal(updateResult.htmlUrl)}
+                              className="inline-flex items-center gap-1 rounded-lg border border-emerald-300 bg-white px-2.5 py-1 text-[11px] font-medium text-emerald-900 hover:bg-emerald-100"
+                            >
+                              <ExternalLink className="h-3 w-3" />
+                              GitHub 页面
+                            </button>
+                            {updateResult.downloadUrl && (
+                              <button
+                                type="button"
+                                disabled={downloadingUpd}
+                                onClick={async () => {
+                                  setDownloadingUpd(true);
+                                  setDlError('');
+                                  const r = await window.fmc.downloadAppUpdate({
+                                    downloadUrl: updateResult.downloadUrl!,
+                                    version: updateResult.latestVersion,
+                                    highlights: updateResult.highlights
+                                  });
+                                  if (!r.ok) {
+                                    setDownloadingUpd(false);
+                                    setDlError(r.message);
+                                  }
+                                }}
+                                className="inline-flex items-center gap-1 rounded-lg bg-[#18181b] px-3 py-1 text-[11.5px] font-medium text-white hover:bg-[#27272a] disabled:opacity-50"
+                              >
+                                {downloadingUpd ? (
+                                  <Loader2 className="h-3 w-3 animate-spin" />
+                                ) : (
+                                  <Download className="h-3 w-3" />
+                                )}
+                                {downloadingUpd ? '下载中...' : '一键下载并安装'}
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                        {updateResult.highlights.length > 0 && (
+                          <ul className="list-disc space-y-1 pl-4 text-[11.5px] text-emerald-900">
+                            {updateResult.highlights.map((h, i) => (
+                              <li key={i}>{h}</li>
+                            ))}
+                          </ul>
+                        )}
+                        {downloadingUpd && dlProgress && (
+                          <div className="space-y-1 pt-1">
+                            <div className="flex justify-between font-mono text-[10.5px]">
+                              <span>下载进度 {dlProgress.percent}%</span>
+                              <span>
+                                {dlProgress.transferredMB} / {dlProgress.totalMB} MB
+                              </span>
+                            </div>
+                            <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/80">
+                              <div
+                                className="h-full rounded-full bg-emerald-600 transition-all"
+                                style={{ width: `${dlProgress.percent}%` }}
+                              />
+                            </div>
+                          </div>
+                        )}
+                        {dlError && <p className="text-[11px] text-red-600">{dlError}</p>}
+                      </div>
+                    ) : updateResult.ok ? (
+                      <span>✓ 当前已是最新版本（v{updateResult.currentVersion}），无需更新。</span>
+                    ) : (
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <span>{updateResult.error || '检查更新失败'}</span>
+                        <button
+                          type="button"
+                          onClick={() => void window.fmc.openExternal(updateResult.htmlUrl)}
+                          className="underline"
+                        >
+                          前往 GitHub 查看
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Startup Automatic Update Check Switch */}
+              <div className="flex items-center justify-between gap-4 px-5 py-4">
+                <div>
+                  <div className="font-medium text-[#111827]">启动软件时自动检测一次更新</div>
+                  <div className="mt-0.5 text-[11.5px] text-[#71717a]">
+                    每次启动后后台静默检查一次 GitHub 新版本；发现更新时弹窗提醒，无更新时不打扰
+                  </div>
+                </div>
+                <button
+                  onClick={() =>
+                    void onUpdateSettings({
+                      checkUpdateOnStartup: settings.checkUpdateOnStartup === false
+                    })
+                  }
+                  className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors ${
+                    settings.checkUpdateOnStartup !== false ? 'bg-[#18181b]' : 'bg-[#e4e4e7]'
+                  }`}
+                >
+                  <span
+                    className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow-2xs transition-transform ${
+                      settings.checkUpdateOnStartup !== false
+                        ? 'translate-x-[18px]'
+                        : 'translate-x-[3px]'
+                    }`}
+                  />
+                </button>
+              </div>
+
               {/* Official Chrome Extension + Built-in Local Browser */}
               <div className="px-5 py-4">
                 <div className="flex flex-wrap items-center justify-between gap-2">

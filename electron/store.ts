@@ -192,11 +192,13 @@ export interface AppSettings {
   monoFont: 'system' | 'cascadia' | 'jetbrains' | 'consolas';
   closeBehavior: CloseBehavior;
   launchAtLogin: boolean;
+  checkUpdateOnStartup?: boolean;
   museDisplayMode: MuseDisplayMode;
 }
 
 export interface FmcState {
   onboardingCompleted: boolean;
+  lastSeenAppVersion?: string;
   permissionLevel: PermissionLevel;
   settings: AppSettings;
   workflow: WorkflowConfig;
@@ -217,6 +219,7 @@ function defaultState(): FmcState {
   const now = new Date().toISOString();
   return {
     onboardingCompleted: false,
+    lastSeenAppVersion: app.getVersion(),
     permissionLevel: 'auto',
     settings: {
       fontSize: 'normal',
@@ -224,6 +227,7 @@ function defaultState(): FmcState {
       monoFont: 'system',
       closeBehavior: 'ask',
       launchAtLogin: false,
+      checkUpdateOnStartup: true,
       museDisplayMode: 'avatar'
     },
     workflow: {
@@ -318,6 +322,8 @@ export class FmcStore {
       return {
         ...base,
         ...parsed,
+        // Preserve parsed.lastSeenAppVersion (even if undefined on upgrade from <=0.6.1) so upgraded users see What's New once!
+        lastSeenAppVersion: parsed.lastSeenAppVersion,
         settings: { ...base.settings, ...(parsed.settings || {}) },
         workflow: { ...base.workflow, ...(parsed.workflow || {}) },
         feishu: { ...base.feishu, ...(parsed.feishu || {}) },

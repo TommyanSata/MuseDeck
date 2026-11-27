@@ -15,6 +15,11 @@ import {
   Tray,
   WebContentsView
 } from 'electron';
+import {
+  checkAppUpdate,
+  downloadAndInstallUpdate,
+  resolveWhatsNewForVersion
+} from './appUpdater';
 import { BenchmarkManager } from './benchmarkManager';
 import {
   detectMuseChromeExtension,
@@ -960,6 +965,7 @@ function registerIpcHandlers(): void {
   ipcMain.handle('onboarding:complete', () => {
     const st = store.update((s) => {
       s.onboardingCompleted = true;
+      s.lastSeenAppVersion = app.getVersion();
     });
     hideAllEmbeddedViews();
     broadcast('state:changed', st);
@@ -2300,6 +2306,49 @@ function registerIpcHandlers(): void {
     return localBrowser.showWindow(url);
   });
 
+  ipcMain.handle('app:getWhatsNew', () => {
+    const cur = app.getVersion();
+    const st = store.getState();
+    const shouldShow = Boolean(st.onboardingCompleted && st.lastSeenAppVersion !== cur);
+    const info = resolveWhatsNewForVersion(cur);
+    return {
+      currentVersion: cur,
+      shouldShow,
+      title: info.title,
+      highlights: info.highlights
+    };
+  });
+
+  ipcMain.handle('app:ackWhatsNew', () => {
+    const st = store.update((s) => {
+      s.lastSeenAppVersion = app.getVersion();
+    });
+    broadcast('state:changed', st);
+    return st;
+  });
+
+  ipcMain.handle('app:checkUpdate', async () => {
+    return checkAppUpdate(app.getVersion());
+  });
+
+  ipcMain.handle(
+    'app:downloadUpdate',
+    async (_ev, payload: { downloadUrl: string; version: string; highlights?: string[] }) => {
+      return downloadAndInstallUpdate({
+        downloadUrl: payload.downloadUrl,
+        version: payload.version,
+        highlights: payload.highlights,
+        onProgress: (prog) => {
+          broadcast('app:updateProgress', prog);
+        },
+        onBeforeQuitAndInstall: () => {
+          isQuitting = true;
+          app.quit();
+        }
+      });
+    }
+  );
+
   ipcMain.handle(
     'autopilot:feishu',
     async (
@@ -2737,6 +2786,19 @@ app.whenReady().then(async () => {
   // Check if protocol changed since last launch (e.g. after app upgrade) and auto-sync to Muse
   if (savedState.onboardingCompleted && savedState.controlApi.autoSyncToMuse !== false) {
     scheduleBriefAutoSync(6000);
+  }
+  // Auto-check for new MuseDeck release once on startup if enabled in Settings
+  if (savedState.onboardingCompleted && savedState.settings?.checkUpdateOnStartup !== false) {
+    setTimeout(async () => {
+      try {
+        const res = await checkAppUpdate(app.getVersion());
+        if (res.ok && res.hasUpdate) {
+          broadcast('app:updateAvailable', res);
+        }
+      } catch {
+        // ignore startup check network failure silently
+      }
+    }, 4500);
   }
 });
 

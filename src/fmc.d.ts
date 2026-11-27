@@ -150,6 +150,14 @@ export interface FmcApi {
     botDesc?: string;
     existingAppId?: string;
   }) => Promise<import('./types').FeishuAutoPilotResult>;
+  getWhatsNew: () => Promise<import('./types').WhatsNewInfo>;
+  ackWhatsNew: () => Promise<FmcState>;
+  checkAppUpdate: () => Promise<import('./types').AppUpdateCheckResult>;
+  downloadAppUpdate: (payload: {
+    downloadUrl: string;
+    version: string;
+    highlights?: string[];
+  }) => Promise<{ ok: boolean; message: string }>;
 
   getTunnelStatus: () => Promise<TunnelStatusEvent>;
   startTailscaleTunnel: () => Promise<TunnelStatusEvent>;

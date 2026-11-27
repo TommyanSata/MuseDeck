@@ -1,11 +1,14 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ChevronDown,
+  Download,
+  ExternalLink,
   Eye,
   EyeOff,
   Folder,
   FolderOpen,
   History,
+  Loader2,
   Minimize2,
   Plus,
   Power,
@@ -29,6 +32,7 @@ import { DEFAULT_APP_SETTINGS, SettingsView } from './components/SettingsView';
 import { WorkspaceView } from './components/WorkspaceView';
 import {
   AppSettings,
+  AppUpdateCheckResult,
   CliUserConfig,
   DetectedCli,
   FeishuStatusEvent,
@@ -38,6 +42,7 @@ import {
   ProjectGroup,
   ScannedLocalSession,
   TunnelStatusEvent,
+  WhatsNewInfo,
   WorkflowRunState
 } from './types';
 
@@ -105,6 +110,19 @@ export const App: React.FC = () => {
   const [showCloseModal, setShowCloseModal] = useState(false);
   const [closeChoice, setCloseChoice] = useState<'tray' | 'quit'>('tray');
   const [rememberClose, setRememberClose] = useState(false);
+
+  // What's New (post-upgrade first open) & Auto-Update states
+  const [whatsNewModal, setWhatsNewModal] = useState<WhatsNewInfo | null>(null);
+  const [availableUpdate, setAvailableUpdate] = useState<AppUpdateCheckResult | null>(null);
+  const [showUpdateModal, setShowUpdateModal] = useState(false);
+  const [downloadingUpdate, setDownloadingUpdate] = useState(false);
+  const [updateProgress, setUpdateProgress] = useState<{
+    percent: number;
+    transferredMB: string;
+    totalMB: string;
+  } | null>(null);
+  const [updateModalErr, setUpdateModalErr] = useState('');
+  const whatsNewCheckedRef = useRef(false);
 
   // FMC top-left dropdown & Muse avatar refresh state
   const [showFmcMenu, setShowFmcMenu] = useState(false);
@@ -338,6 +356,17 @@ export const App: React.FC = () => {
       setRememberClose(false);
       setShowCloseModal(true);
     });
+    const offUpdateAvail = window.fmc.onEvent('app:updateAvailable', (payload) => {
+      const upd = payload as AppUpdateCheckResult;
+      if (upd?.hasUpdate) {
+        setAvailableUpdate(upd);
+        void window.fmc.hideEmbeddedViews();
+        setShowUpdateModal(true);
+      }
+    });
+    const offUpdateProg = window.fmc.onEvent('app:updateProgress', (payload) => {
+      setUpdateProgress(payload as { percent: number; transferredMB: string; totalMB: string });
+    });
     return () => {
       offState();
       offFeishu();
@@ -345,9 +374,23 @@ export const App: React.FC = () => {
       offWorkflow();
       offMuseLive();
       offCloseReq();
+      offUpdateAvail();
+      offUpdateProg();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Show concise What's New summary once on first launch after upgrading to a new version
+  useEffect(() => {
+    if (!state?.onboardingCompleted || whatsNewCheckedRef.current) return;
+    whatsNewCheckedRef.current = true;
+    void window.fmc.getWhatsNew().then((info) => {
+      if (info.shouldShow) {
+        void window.fmc.hideEmbeddedViews();
+        setWhatsNewModal(info);
+      }
+    });
+  }, [state?.onboardingCompleted]);
 
   // Auto-fetch Muse custom avatar once if in avatar mode and not yet cached
   const avatarAutoFetched = useRef(false);
@@ -1145,6 +1188,11 @@ export const App: React.FC = () => {
               <Settings className="h-3.5 w-3.5" />
               <span>软件设置</span>
             </span>
+            {availableUpdate?.hasUpdate && (
+              <span className="rounded-full bg-emerald-500 px-1.5 py-0.5 text-[9.5px] font-semibold text-white">
+                新版本
+              </span>
+            )}
           </button>
 
           <div className="mt-1 flex items-center justify-between px-2 pt-1 text-[11px] text-[#8a8f98]">
@@ -1229,6 +1277,12 @@ export const App: React.FC = () => {
         {activeTab === 'settings' && (
           <SettingsView
             state={state}
+            availableUpdate={availableUpdate}
+            onUpdateDetected={(upd) => setAvailableUpdate(upd.hasUpdate ? upd : null)}
+            onShowWhatsNew={async () => {
+              const info = await window.fmc.getWhatsNew();
+              setWhatsNewModal({ ...info, shouldShow: true });
+            }}
             onUpdateSettings={async (patch) => {
               const next = await window.fmc.updateSettings(patch);
               setState(next);
@@ -1247,6 +1301,175 @@ export const App: React.FC = () => {
 
       {/* Close Confirmation Modal (Minimize to Tray vs Quit + Remember Choice) */}
       {closeModalNode}
+
+      {/* Post-Upgrade First Open "What's New" Concise Summary Modal */}
+      {whatsNewModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/25 p-4 backdrop-blur-[1px]">
+          <div className="w-full max-w-[440px] rounded-2xl border border-[#e4e4e7] bg-white p-5 shadow-popover">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <span className="inline-flex h-7 w-7 items-center justify-center rounded-lg bg-[#18181b] text-white">
+                  <Sparkles className="h-3.5 w-3.5" />
+                </span>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-[14px] font-semibold text-[#111827]">本次版本更新内容</h3>
+                    <span className="rounded-full bg-emerald-100 px-2 py-0.5 font-mono text-[10.5px] font-semibold text-emerald-800">
+                      v{whatsNewModal.currentVersion}
+                    </span>
+                  </div>
+                  <p className="text-[11.5px] text-[#71717a]">{whatsNewModal.title}</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={async () => {
+                  const next = await window.fmc.ackWhatsNew();
+                  setState(next);
+                  setWhatsNewModal(null);
+                }}
+                className="rounded-lg p-1 text-[#8a8f98] hover:bg-[#f4f4f5] hover:text-[#111827]"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <ul className="mt-4 space-y-2 rounded-xl border border-[#f1f1f3] bg-[#fafafa] p-3.5 text-[12.5px] leading-relaxed text-[#3f3f46]">
+              {whatsNewModal.highlights.map((line, idx) => (
+                <li key={idx} className="flex items-start gap-2">
+                  <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-[#18181b]" />
+                  <span>{line}</span>
+                </li>
+              ))}
+            </ul>
+
+            <div className="mt-4 flex justify-end">
+              <button
+                type="button"
+                onClick={async () => {
+                  const next = await window.fmc.ackWhatsNew();
+                  setState(next);
+                  setWhatsNewModal(null);
+                }}
+                className="rounded-xl bg-[#18181b] px-4 py-1.5 text-[12.5px] font-medium text-white transition-colors hover:bg-[#27272a]"
+              >
+                我知道了
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Startup Auto-Detected New Release Modal */}
+      {showUpdateModal && availableUpdate?.hasUpdate && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/25 p-4 backdrop-blur-[1px]">
+          <div className="w-full max-w-[450px] rounded-2xl border border-[#e4e4e7] bg-white p-5 shadow-popover">
+            <div className="flex items-center justify-between gap-2">
+              <div>
+                <div className="flex items-center gap-2">
+                  <h3 className="text-[14px] font-semibold text-[#111827]">
+                    发现新版本 v{availableUpdate.latestVersion}
+                  </h3>
+                  <span className="rounded-md bg-[#f4f4f5] px-1.5 py-0.5 font-mono text-[10.5px] text-[#71717a]">
+                    当前 v{availableUpdate.currentVersion}
+                  </span>
+                </div>
+                <p className="mt-0.5 text-[11.5px] text-[#71717a]">
+                  {availableUpdate.releaseTitle || '已发布最新安装包，支持一键下载并自动覆盖升级'}
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={downloadingUpdate}
+                onClick={() => setShowUpdateModal(false)}
+                className="rounded-lg p-1 text-[#8a8f98] hover:bg-[#f4f4f5] hover:text-[#111827] disabled:opacity-40"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            {availableUpdate.highlights.length > 0 && (
+              <ul className="mt-3.5 max-h-48 space-y-1.5 overflow-y-auto rounded-xl border border-[#f1f1f3] bg-[#fafafa] p-3 text-[12px] leading-relaxed text-[#3f3f46]">
+                {availableUpdate.highlights.map((h, idx) => (
+                  <li key={idx} className="flex items-start gap-2">
+                    <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-600" />
+                    <span>{h}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+
+            {downloadingUpdate && updateProgress && (
+              <div className="mt-3.5 space-y-1">
+                <div className="flex justify-between font-mono text-[11px] text-[#52525b]">
+                  <span>正在下载更新包... {updateProgress.percent}%</span>
+                  <span>
+                    {updateProgress.transferredMB} / {updateProgress.totalMB} MB
+                  </span>
+                </div>
+                <div className="h-2 w-full overflow-hidden rounded-full bg-[#f1f1f3]">
+                  <div
+                    className="h-full rounded-full bg-[#18181b] transition-all"
+                    style={{ width: `${updateProgress.percent}%` }}
+                  />
+                </div>
+              </div>
+            )}
+
+            {updateModalErr && (
+              <p className="mt-2.5 text-[11.5px] text-red-600">{updateModalErr}</p>
+            )}
+
+            <div className="mt-4 flex items-center justify-between gap-2">
+              <button
+                type="button"
+                onClick={() => void window.fmc.openExternal(availableUpdate.htmlUrl)}
+                className="inline-flex items-center gap-1 text-[11.5px] font-medium text-[#71717a] hover:text-[#111827]"
+              >
+                <ExternalLink className="h-3 w-3" />
+                前往 GitHub 查看
+              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={downloadingUpdate}
+                  onClick={() => setShowUpdateModal(false)}
+                  className="rounded-xl border border-[#e4e4e7] px-3 py-1.5 text-[12px] font-medium text-[#52525b] hover:bg-[#f4f4f5] disabled:opacity-40"
+                >
+                  稍后提醒
+                </button>
+                {availableUpdate.downloadUrl && (
+                  <button
+                    type="button"
+                    disabled={downloadingUpdate}
+                    onClick={async () => {
+                      setDownloadingUpdate(true);
+                      setUpdateModalErr('');
+                      const res = await window.fmc.downloadAppUpdate({
+                        downloadUrl: availableUpdate.downloadUrl!,
+                        version: availableUpdate.latestVersion,
+                        highlights: availableUpdate.highlights
+                      });
+                      if (!res.ok) {
+                        setDownloadingUpdate(false);
+                        setUpdateModalErr(res.message);
+                      }
+                    }}
+                    className="inline-flex items-center gap-1.5 rounded-xl bg-[#18181b] px-4 py-1.5 text-[12px] font-medium text-white hover:bg-[#27272a] disabled:opacity-50"
+                  >
+                    {downloadingUpdate ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <Download className="h-3.5 w-3.5" />
+                    )}
+                    {downloadingUpdate ? '正在下载...' : '立即下载并安装'}
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Right-Click Context Menu for Sidebar Projects */}
       {projectMenu && (() => {
