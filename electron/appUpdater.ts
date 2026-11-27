@@ -31,6 +31,14 @@ export interface WhatsNewInfo {
 }
 
 export const BUILTIN_RELEASE_HIGHLIGHTS: Record<string, { title: string; highlights: string[] }> = {
+  '0.6.3': {
+    title: '彻底修复飞书一键代配跳窗口与页面滚动点偏问题',
+    highlights: [
+      '改用免滚动 DOM 节点直接锁定点击与 preventScroll 聚焦输入，彻底消除识别画框后页面下滑导致的误点',
+      '锁死飞书开放平台视图的新窗口弹窗拦截（屏蔽说明文档外链抢占窗口），确保机器人能力稳定在同一窗口添加成功',
+      '保留在线检查更新、一键下载自动覆盖升级与启动更新检测开关'
+    ]
+  },
   '0.6.2': {
     title: '支持在线检测与一键安装更新 · 升级后更新说明提示',
     highlights: [

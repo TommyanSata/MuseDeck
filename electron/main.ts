@@ -170,8 +170,17 @@ function ensureEmbeddedView(target: 'feishu' | 'muse', initialUrl?: string): Web
     const chromeUa = view.webContents.getUserAgent().replace(/Electron\/[\d.]+ /, '');
     view.webContents.setUserAgent(chromeUa);
 
-    // Handle popups inside the same embedded view instead of losing session
+    // Keep app console routes inside the same view; block doc/external popups from hijacking or spawning windows
     view.webContents.setWindowOpenHandler(({ url }) => {
+      if (target === 'feishu') {
+        if (
+          /^https:\/\/open\.feishu\.cn\/app(\/|$|\?)/i.test(url) ||
+          /^https:\/\/(accounts|passport)\.feishu\.cn\//i.test(url)
+        ) {
+          void view?.webContents.loadURL(url);
+        }
+        return { action: 'deny' };
+      }
       void view?.webContents.loadURL(url);
       return { action: 'deny' };
     });
@@ -2360,17 +2369,30 @@ function registerIpcHandlers(): void {
         targetWc = embeddedViews.feishu.webContents;
       } else {
         if (!feishuPopupWin || feishuPopupWin.isDestroyed()) {
+          const feishuSes = session.fromPartition('persist:fmc-feishu');
           feishuPopupWin = new BrowserWindow({
             width: 1080,
             height: 760,
             title: 'MuseDeck · 飞书开放平台本地一键代配助手（扫码登录后全程自动填表）',
             autoHideMenuBar: true,
             webPreferences: {
-              partition: 'persist:feishu',
+              session: feishuSes,
               contextIsolation: true,
               nodeIntegration: false,
               sandbox: true
             }
+          });
+          const chromeUa = feishuPopupWin.webContents.getUserAgent().replace(/Electron\/[\d.]+ /, '');
+          feishuPopupWin.webContents.setUserAgent(chromeUa);
+          // Prevent any target="_blank" link from spawning extra windows or jumping to doc pages
+          feishuPopupWin.webContents.setWindowOpenHandler(({ url }) => {
+            if (
+              /^https:\/\/open\.feishu\.cn\/app(\/|$|\?)/i.test(url) ||
+              /^https:\/\/(accounts|passport)\.feishu\.cn\//i.test(url)
+            ) {
+              void feishuPopupWin?.webContents.loadURL(url);
+            }
+            return { action: 'deny' };
           });
           feishuPopupWin.on('closed', () => {
             feishuPopupWin = null;

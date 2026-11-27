@@ -645,15 +645,12 @@ async function sendSelectAllAndBackspace(wc: WebContents): Promise<void> {
   await sleep(160);
 }
 
-async function typeNativeIntoRect(
+async function typeNativeIntoFocusedElement(
   wc: WebContents,
-  rect: { x: number; y: number; width: number; height: number },
   value: string,
   pressEnter = false
 ): Promise<void> {
-  await highlightRectOnPage(wc, rect, 450);
-  await clickHardwareAt(wc, rect.x + Math.min(40, rect.width / 2), rect.y + rect.height / 2);
-  await sleep(180);
+  await sleep(140);
   await sendSelectAllAndBackspace(wc);
   await wc.insertText(value);
   await sleep(220);
@@ -696,8 +693,8 @@ async function navigateFeishuSection(
   fallbackUrl: string
 ): Promise<boolean> {
   try {
-    const rect = (await wc.executeJavaScript(
-      `(() => {
+    const clickedSidebar = (await wc.executeJavaScript(
+      `(async () => {
         const labels = ${JSON.stringify(menuLabels)};
         const candidates = Array.from(
           document.querySelectorAll('aside a, aside li, aside div, nav a, nav li, [class*="menu"] a, [class*="menu"] li, [class*="sider"] div, [class*="nav"] span')
@@ -705,25 +702,35 @@ async function navigateFeishuSection(
         for (const label of labels) {
           for (const el of candidates) {
             if (!(el instanceof HTMLElement)) continue;
+            if (el.tagName === 'A' && el.getAttribute('target') === '_blank') continue;
             const txt = (el.innerText || '').trim();
             if (txt === label) {
               const r = el.getBoundingClientRect();
               if (r.width >= 20 && r.height >= 14 && r.height <= 64 && r.left < 340) {
-                el.scrollIntoView({ block: 'nearest' });
-                const nr = el.getBoundingClientRect();
-                return { x: nr.left, y: nr.top, width: nr.width, height: nr.height };
+                if (r.top < 20 || r.bottom > window.innerHeight - 20) {
+                  el.scrollIntoView({ behavior: 'instant', block: 'nearest' });
+                }
+                const prevOutline = el.style.outline;
+                const prevOffset = el.style.outlineOffset;
+                el.style.outline = '2.5px solid #10b981';
+                el.style.outlineOffset = '2px';
+                await new Promise((resolve) => setTimeout(resolve, 450));
+                el.style.outline = prevOutline;
+                el.style.outlineOffset = prevOffset;
+                el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+                el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+                el.click();
+                return true;
               }
             }
           }
         }
-        return null;
+        return false;
       })()`,
       true
-    )) as { x: number; y: number; width: number; height: number } | null;
+    )) as boolean;
 
-    if (rect) {
-      await highlightRectOnPage(wc, rect, 500);
-      await clickHardwareAt(wc, rect.x + rect.width / 2, rect.y + rect.height / 2);
+    if (clickedSidebar) {
       const ok = await waitForPageKeyword(wc, readyKeywords, 6500);
       if (ok) {
         await sleep(500);
@@ -742,41 +749,75 @@ async function navigateFeishuSection(
 async function findAndHighlightClick(
   wc: WebContents,
   regexSource: string,
-  options?: { insideModal?: boolean; exact?: boolean; pauseAfterMs?: number }
+  options?: { insideModal?: boolean; exact?: boolean; buttonsOnly?: boolean; pauseAfterMs?: number }
 ): Promise<{ clicked: boolean; label: string }> {
-  const rectInfo = (await wc.executeJavaScript(
-    `(() => {
+  const clickRes = (await wc.executeJavaScript(
+    `(async () => {
       const re = new RegExp(${JSON.stringify(regexSource)}, 'i');
-      const scope = ${Boolean(options?.insideModal)}
+      const insideModal = ${Boolean(options?.insideModal)};
+      const buttonsOnly = ${Boolean(options?.buttonsOnly)};
+      const exact = ${Boolean(options?.exact)};
+      const exactText = ${JSON.stringify(regexSource)};
+      const scope = insideModal
         ? (document.querySelector('[role="dialog"], .ud__modal, .semi-modal-content, .arco-modal') || document)
         : document;
-      const nodes = Array.from(scope.querySelectorAll('button, a, [role="button"], label, span'));
+      const selector = buttonsOnly
+        ? 'button, [role="button"]'
+        : 'button, a, [role="button"], label, span';
+      const nodes = Array.from(scope.querySelectorAll(selector));
       for (const node of nodes) {
-        const btn = node.closest('button, a, [role="button"], label') || node;
+        const btn = buttonsOnly
+          ? (node.closest('button, [role="button"]') || node)
+          : (node.closest('button, a, [role="button"], label') || node);
         if (!(btn instanceof HTMLElement)) continue;
+        const anchor = btn.closest('a');
+        if (anchor) {
+          const href = (anchor.getAttribute('href') || '').toLowerCase();
+          if (
+            buttonsOnly ||
+            anchor.getAttribute('target') === '_blank' ||
+            href.includes('/document/') ||
+            href.includes('feishu.cn/hc/')
+          ) {
+            continue;
+          }
+        }
         if (btn.hasAttribute('disabled') || btn.getAttribute('aria-disabled') === 'true') continue;
         const style = window.getComputedStyle(btn);
         if (style.display === 'none' || style.visibility === 'hidden' || style.pointerEvents === 'none') continue;
         const txt = (btn.innerText || '').replace(/\\s+/g, ' ').trim();
         if (!txt || txt.length > 40) continue;
-        const matched = ${Boolean(options?.exact)} ? txt === ${JSON.stringify(regexSource)} : re.test(txt);
+        const matched = exact ? txt === exactText : re.test(txt);
         if (!matched) continue;
         const r = btn.getBoundingClientRect();
         if (r.width < 16 || r.height < 14) continue;
-        btn.scrollIntoView({ block: 'center' });
-        const nr = btn.getBoundingClientRect();
-        return { x: nr.left, y: nr.top, width: nr.width, height: nr.height, label: txt };
+        if (!insideModal && (r.top < 36 || r.bottom > window.innerHeight - 36)) {
+          btn.scrollIntoView({ behavior: 'instant', block: 'nearest' });
+        }
+        const prevOutline = btn.style.outline;
+        const prevOffset = btn.style.outlineOffset;
+        const prevShadow = btn.style.boxShadow;
+        btn.style.outline = '2.5px solid #10b981';
+        btn.style.outlineOffset = '2px';
+        btn.style.boxShadow = '0 0 0 4px rgba(16, 185, 129, 0.22)';
+        await new Promise((resolve) => setTimeout(resolve, 520));
+        btn.style.outline = prevOutline;
+        btn.style.outlineOffset = prevOffset;
+        btn.style.boxShadow = prevShadow;
+        btn.focus({ preventScroll: true });
+        btn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+        btn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+        btn.click();
+        return { clicked: true, label: txt };
       }
       return null;
     })()`,
     true
-  )) as { x: number; y: number; width: number; height: number; label: string } | null;
+  )) as { clicked: boolean; label: string } | null;
 
-  if (!rectInfo) return { clicked: false, label: '' };
-  await highlightRectOnPage(wc, rectInfo, 600);
-  await clickHardwareAt(wc, rectInfo.x + rectInfo.width / 2, rectInfo.y + rectInfo.height / 2);
+  if (!clickRes?.clicked) return { clicked: false, label: '' };
   await sleep(options?.pauseAfterMs ?? 950);
-  return { clicked: true, label: rectInfo.label };
+  return { clicked: true, label: clickRes.label };
 }
 
 /**
@@ -855,33 +896,47 @@ export async function runFeishuLocalAutoPilot(params: {
       completedSteps.push(`已进入已填应用 (${appId})`);
       stepReport.push({ step: '1. 创建/定位自建应用', status: 'ok', detail: `已打开应用 ${appId}` });
     } else {
-      const createClick = await findAndHighlightClick(wc, '创建企业自建应用', { pauseAfterMs: 1100 });
+      const createClick = await findAndHighlightClick(wc, '创建企业自建应用', {
+        buttonsOnly: true,
+        pauseAfterMs: 1100
+      });
       if (createClick.clicked) {
-        const modalInputs = (await wc.executeJavaScript(
+        const fieldCount = (await wc.executeJavaScript(
           `(() => {
             const modal = document.querySelector('[role="dialog"], .ud__modal, .semi-modal-content, .arco-modal') || document.body;
-            const fields = Array.from(modal.querySelectorAll('input[type="text"], input:not([type]), textarea'))
-              .filter((el) => {
-                const r = el.getBoundingClientRect();
-                return r.width > 80 && r.height > 20;
-              })
-              .map((el) => {
-                const r = el.getBoundingClientRect();
-                return { x: r.left, y: r.top, width: r.width, height: r.height, tag: el.tagName };
-              });
-            return fields;
+            return Array.from(modal.querySelectorAll('input[type="text"], input:not([type]), textarea'))
+              .filter((el) => el.getBoundingClientRect().width > 80 && el.getBoundingClientRect().height > 20).length;
           })()`,
           true
-        )) as Array<{ x: number; y: number; width: number; height: number; tag: string }>;
+        )) as number;
 
-        if (modalInputs[0]) {
-          await typeNativeIntoRect(wc, modalInputs[0], botName);
+        for (let fIdx = 0; fIdx < Math.min(2, fieldCount); fIdx++) {
+          const focused = (await wc.executeJavaScript(
+            `(async () => {
+              const modal = document.querySelector('[role="dialog"], .ud__modal, .semi-modal-content, .arco-modal') || document.body;
+              const fields = Array.from(modal.querySelectorAll('input[type="text"], input:not([type]), textarea'))
+                .filter((el) => el.getBoundingClientRect().width > 80 && el.getBoundingClientRect().height > 20);
+              const el = fields[${fIdx}];
+              if (!el || !(el instanceof HTMLElement)) return false;
+              const prev = el.style.outline;
+              el.style.outline = '2.5px solid #10b981';
+              el.focus({ preventScroll: true });
+              await new Promise((r) => setTimeout(r, 380));
+              el.style.outline = prev;
+              return true;
+            })()`,
+            true
+          )) as boolean;
+          if (focused) {
+            await typeNativeIntoFocusedElement(wc, fIdx === 0 ? botName : botDesc);
+          }
         }
-        if (modalInputs[1]) {
-          await typeNativeIntoRect(wc, modalInputs[1], botDesc);
-        }
-        await sleep(600);
-        await findAndHighlightClick(wc, '^(创建|确定|确认)$', { insideModal: true, pauseAfterMs: 1200 });
+        await sleep(500);
+        await findAndHighlightClick(wc, '^(创建|确定|确认)$', {
+          insideModal: true,
+          buttonsOnly: true,
+          pauseAfterMs: 1300
+        });
 
         for (let i = 0; i < 20; i++) {
           await sleep(500);
@@ -932,12 +987,13 @@ export async function runFeishuLocalAutoPilot(params: {
         wc,
         ['添加应用能力'],
         ['按能力添加', '机器人', '网页应用'],
-        `https://open.feishu.cn/app/${appId}/bot`
+        `https://open.feishu.cn/app/${appId}`
       );
-      await sleep(700);
+      await sleep(800);
 
-      const botCardBtn = (await wc.executeJavaScript(
-        `(() => {
+      // Click the exact <button> "+ 添加" inside the "机器人" card directly on the DOM node (zero scroll drift, never clicks <a> doc links!)
+      const botAddRes = (await wc.executeJavaScript(
+        `(async () => {
           const allNodes = Array.from(document.querySelectorAll('div, section, li'));
           const botCards = allNodes.filter((el) => {
             if (!(el instanceof HTMLElement)) return false;
@@ -945,45 +1001,73 @@ export async function runFeishuLocalAutoPilot(params: {
             if (!txt.includes('机器人')) return false;
             if (txt.includes('网页应用') && txt.includes('小程序')) return false;
             const r = el.getBoundingClientRect();
-            return r.width >= 180 && r.width <= 680 && r.height >= 80 && r.height <= 380;
+            return r.width >= 180 && r.width <= 720 && r.height >= 70 && r.height <= 400;
           });
           botCards.sort((a, b) => a.innerText.length - b.innerText.length);
           for (const card of botCards) {
             if ((card.innerText || '').includes('已添加')) {
-              return { alreadyAdded: true };
+              return { status: 'already_added' };
             }
-            const btn = Array.from(card.querySelectorAll('button, [role="button"]')).find((b) => {
+            const btn = Array.from(card.querySelectorAll('button')).find((b) => {
               const t = (b.innerText || '').replace(/\\s+/g, '').trim();
+              if (/了解|文档|详情|示例/.test(t)) return false;
               return /^(\\+?添加|添加机器人|启用)$/.test(t) && !b.hasAttribute('disabled');
             });
             if (btn && btn instanceof HTMLElement) {
-              btn.scrollIntoView({ block: 'center' });
               const r = btn.getBoundingClientRect();
-              return { x: r.left, y: r.top, width: r.width, height: r.height };
+              if (r.top < 36 || r.bottom > window.innerHeight - 36) {
+                card.scrollIntoView({ behavior: 'instant', block: 'nearest' });
+                await new Promise((res) => setTimeout(res, 150));
+              }
+              const prevOutline = btn.style.outline;
+              btn.style.outline = '2.5px solid #10b981';
+              btn.style.outlineOffset = '3px';
+              await new Promise((res) => setTimeout(res, 650));
+              btn.style.outline = prevOutline;
+              btn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+              btn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+              btn.click();
+              return { status: 'clicked' };
             }
           }
-          return null;
+          return { status: 'not_found' };
         })()`,
         true
-      )) as { alreadyAdded?: boolean; x?: number; y?: number; width?: number; height?: number } | null;
+      )) as { status: 'already_added' | 'clicked' | 'not_found' };
 
-      if (botCardBtn?.alreadyAdded) {
+      if (botAddRes.status === 'already_added') {
         completedSteps.push('「机器人」能力已处于添加状态');
         stepReport.push({ step: '2. 添加「机器人」能力', status: 'ok', detail: '已启用机器人能力' });
-      } else if (botCardBtn && typeof botCardBtn.x === 'number') {
-        await highlightRectOnPage(
-          wc,
-          { x: botCardBtn.x, y: botCardBtn.y!, width: botCardBtn.width!, height: botCardBtn.height! },
-          700
-        );
-        await clickHardwareAt(
-          wc,
-          botCardBtn.x + botCardBtn.width! / 2,
-          botCardBtn.y! + botCardBtn.height! / 2
-        );
-        await sleep(1800);
-        completedSteps.push('已自动点击添加「机器人」能力');
-        stepReport.push({ step: '2. 添加「机器人」能力', status: 'ok', detail: '成功为应用添加机器人能力' });
+      } else if (botAddRes.status === 'clicked') {
+        await sleep(1200);
+        // Handle optional secondary confirmation button if Feishu opens a confirm modal
+        await findAndHighlightClick(wc, '^(添加|确定|确认|保存)$', {
+          insideModal: true,
+          buttonsOnly: true,
+          pauseAfterMs: 1200
+        });
+        await sleep(900);
+
+        const verifiedBot = (await wc.executeJavaScript(
+          `(() => {
+            const menuItems = Array.from(document.querySelectorAll('aside *, nav *, [class*="menu"] *'))
+              .map((el) => (el instanceof HTMLElement ? (el.innerText || '').trim() : ''));
+            if (menuItems.includes('机器人')) return true;
+            return (document.body?.innerText || '').includes('已添加') || location.href.includes('/bot');
+          })()`,
+          true
+        )) as boolean;
+
+        if (verifiedBot) {
+          completedSteps.push('已自动添加并验证「机器人」能力');
+          stepReport.push({ step: '2. 添加「机器人」能力', status: 'ok', detail: '成功为应用添加机器人能力' });
+        } else {
+          stepReport.push({
+            step: '2. 添加「机器人」能力',
+            status: 'warn',
+            detail: '已点击机器人卡片「添加」，请确认左侧菜单「应用能力 → 机器人」已出现'
+          });
+        }
       } else {
         stepReport.push({
           step: '2. 添加「机器人」能力',
@@ -1063,18 +1147,50 @@ export async function runFeishuLocalAutoPilot(params: {
         rect: { x: number; y: number; width: number; height: number } | null;
       };
 
-      // Layer 2: Native Hardware Click + Ctrl+A + Backspace + Native Clipboard wc.paste()!
+      // Layer 2: Focus Monaco's hidden inputarea directly with preventScroll + Native Clipboard wc.paste()!
       if (!editorCheck.hasScopes && editorCheck.rect && editorCheck.rect.width > 40) {
         const prevClipboard = clipboard.readText();
         try {
           clipboard.writeText(FEISHU_REQUIRED_SCOPES_JSON);
-          await highlightRectOnPage(wc, editorCheck.rect, 550);
-          await clickHardwareAt(
-            wc,
-            editorCheck.rect.x + Math.min(120, editorCheck.rect.width / 2),
-            editorCheck.rect.y + Math.min(60, editorCheck.rect.height / 2)
+          // Focus Monaco's internal textarea directly WITHOUT triggering any page scroll!
+          await wc.executeJavaScript(
+            `(async () => {
+              const modal = document.querySelector('[role="dialog"], .ud__modal, .semi-modal-content, .arco-modal');
+              if (!modal) return;
+              const edBox = modal.querySelector('.monaco-editor, .cm-content, textarea');
+              if (edBox instanceof HTMLElement) {
+                const prev = edBox.style.outline;
+                edBox.style.outline = '2.5px solid #10b981';
+                await new Promise((r) => setTimeout(r, 450));
+                edBox.style.outline = prev;
+              }
+              const inputArea = modal.querySelector('.monaco-editor textarea.inputarea, .monaco-editor textarea, textarea');
+              if (inputArea instanceof HTMLElement) {
+                inputArea.focus({ preventScroll: true });
+              }
+            })()`,
+            true
           );
-          await sleep(260);
+          // Re-read stationary rect inside fixed modal without any scrollIntoView
+          const freshRect = (await wc.executeJavaScript(
+            `(() => {
+              const modal = document.querySelector('[role="dialog"], .ud__modal, .semi-modal-content, .arco-modal');
+              const ed = modal && modal.querySelector('.monaco-editor .view-lines, .monaco-editor, textarea');
+              if (!ed) return null;
+              const r = ed.getBoundingClientRect();
+              return { x: r.left, y: r.top, width: r.width, height: r.height };
+            })()`,
+            true
+          )) as { x: number; y: number; width: number; height: number } | null;
+
+          if (freshRect && freshRect.width > 40) {
+            await clickHardwareAt(
+              wc,
+              freshRect.x + Math.min(120, freshRect.width / 2),
+              freshRect.y + Math.min(60, freshRect.height / 2)
+            );
+          }
+          await sleep(240);
           await sendSelectAllAndBackspace(wc);
           wc.paste();
           await sleep(750);
@@ -1195,14 +1311,14 @@ export async function runFeishuLocalAutoPilot(params: {
     const prevClipForSecret = clipboard.readText();
     try {
       clipboard.writeText('');
-      const secretIconRects = (await wc.executeJavaScript(
+      const secretMeta = (await wc.executeJavaScript(
         `(() => {
           const labels = Array.from(document.querySelectorAll('div, span, td, th, label'));
           const secretLabel = labels.find((el) => (el.innerText || '').trim() === 'App Secret');
           const row =
             (secretLabel && secretLabel.closest('tr, [class*="row"], [class*="item"], [class*="field"], [class*="secret"]')) ||
             (secretLabel && secretLabel.parentElement && secretLabel.parentElement.parentElement);
-          if (!row) return { directText: '', rects: [] };
+          if (!row) return { directText: '', count: 0 };
           const rowTxt = (row.innerText || '');
           const directMatch = rowTxt.match(/\\b([a-zA-Z0-9]{28,40})\\b/g) || [];
           const validDirect = directMatch.find((s) => !s.startsWith('cli_') && /[a-zA-Z]/.test(s) && /\\d/.test(s)) || '';
@@ -1216,25 +1332,31 @@ export async function runFeishuLocalAutoPilot(params: {
               const r = el.getBoundingClientRect();
               return r.width >= 12 && r.width <= 80 && r.height >= 12 && r.height <= 48;
             })
-            .slice(0, 3)
-            .map((el) => {
-              const r = el.getBoundingClientRect();
-              return { x: r.left, y: r.top, width: r.width, height: r.height };
-            });
-          return { directText: validDirect, rects: btns };
+            .slice(0, 3);
+          btns.forEach((b, i) => b.setAttribute('data-fmc-sec-btn', String(i)));
+          return { directText: validDirect, count: btns.length };
         })()`,
         true
-      )) as {
-        directText: string;
-        rects: Array<{ x: number; y: number; width: number; height: number }>;
-      };
+      )) as { directText: string; count: number };
 
-      if (secretIconRects.directText) {
-        extractedSecret = secretIconRects.directText;
+      if (secretMeta.directText) {
+        extractedSecret = secretMeta.directText;
       } else {
-        for (const r of secretIconRects.rects) {
-          await highlightRectOnPage(wc, r, 450);
-          await clickHardwareAt(wc, r.x + r.width / 2, r.y + r.height / 2);
+        for (let idx = 0; idx < secretMeta.count; idx++) {
+          await wc.executeJavaScript(
+            `(async () => {
+              const b = document.querySelector('[data-fmc-sec-btn="${idx}"]');
+              if (!(b instanceof HTMLElement)) return;
+              const prev = b.style.outline;
+              b.style.outline = '2px solid #10b981';
+              await new Promise((r) => setTimeout(r, 400));
+              b.style.outline = prev;
+              b.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+              b.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+              b.click();
+            })()`,
+            true
+          );
           await sleep(550);
 
           const clipVal = clipboard.readText().trim();
@@ -1324,48 +1446,61 @@ export async function runFeishuLocalAutoPilot(params: {
     )) as boolean;
 
     if (!eventSubscribed) {
-      const addEv = await findAndHighlightClick(wc, '添加事件', { pauseAfterMs: 1100 });
+      const addEv = await findAndHighlightClick(wc, '添加事件', {
+        buttonsOnly: true,
+        pauseAfterMs: 1100
+      });
       if (addEv.clicked) {
-        const searchRect = (await wc.executeJavaScript(
-          `(() => {
+        const searchFocused = (await wc.executeJavaScript(
+          `(async () => {
             const modal = document.querySelector('[role="dialog"], .ud__modal, .semi-modal-content, .arco-modal') || document;
             const inp = Array.from(modal.querySelectorAll('input'))
               .find((i) => i.type !== 'checkbox' && i.type !== 'radio' && i.getBoundingClientRect().width > 80);
-            if (!inp) return null;
-            const r = inp.getBoundingClientRect();
-            return { x: r.left, y: r.top, width: r.width, height: r.height };
+            if (!inp || !(inp instanceof HTMLElement)) return false;
+            const prev = inp.style.outline;
+            inp.style.outline = '2.5px solid #10b981';
+            inp.focus({ preventScroll: true });
+            await new Promise((r) => setTimeout(r, 400));
+            inp.style.outline = prev;
+            return true;
           })()`,
           true
-        )) as { x: number; y: number; width: number; height: number } | null;
+        )) as boolean;
 
-        if (searchRect) {
-          await typeNativeIntoRect(wc, searchRect, 'im.message.receive_v1', true);
+        if (searchFocused) {
+          await typeNativeIntoFocusedElement(wc, 'im.message.receive_v1', true);
           await sleep(1100);
         }
 
-        const cbRect = (await wc.executeJavaScript(
-          `(() => {
+        const cbClicked = (await wc.executeJavaScript(
+          `(async () => {
             const modal = document.querySelector('[role="dialog"], .ud__modal, .semi-modal-content, .arco-modal');
-            if (!modal) return null;
+            if (!modal) return false;
             const rows = Array.from(modal.querySelectorAll('label, tr, li, div')).filter((el) => {
               if (!(el instanceof HTMLElement)) return false;
               const t = el.innerText || '';
-              return (t.includes('接收消息') || t.includes('im.message.receive_v1')) && el.getBoundingClientRect().height < 90;
+              return (t.includes('接收消息') || t.includes('im.message.receive_v1')) && el.getBoundingClientRect().height < 95;
             });
             rows.sort((a, b) => a.innerText.length - b.innerText.length);
             const target = (rows[0] && rows[0].querySelector('input[type="checkbox"], .ud__checkbox, .semi-checkbox, .arco-checkbox')) || rows[0];
-            if (!target || !(target instanceof HTMLElement)) return null;
-            const r = target.getBoundingClientRect();
-            return { x: r.left, y: r.top, width: r.width, height: r.height };
+            if (!target || !(target instanceof HTMLElement)) return false;
+            const prev = target.style.outline;
+            target.style.outline = '2.5px solid #10b981';
+            await new Promise((r) => setTimeout(r, 500));
+            target.style.outline = prev;
+            target.click();
+            return true;
           })()`,
           true
-        )) as { x: number; y: number; width: number; height: number } | null;
+        )) as boolean;
 
-        if (cbRect) {
-          await highlightRectOnPage(wc, cbRect, 550);
-          await clickHardwareAt(wc, cbRect.x + Math.min(14, cbRect.width / 2), cbRect.y + cbRect.height / 2);
+        if (cbClicked) {
           await sleep(600);
-          await findAndHighlightClick(wc, '确认添加|确定', { insideModal: true, pauseAfterMs: 1400 });
+          await findAndHighlightClick(wc, '确认添加|确定', {
+            insideModal: true,
+            buttonsOnly: true,
+            pauseAfterMs: 1400
+          });
         }
 
         eventSubscribed = (await wc.executeJavaScript(
@@ -1407,37 +1542,49 @@ export async function runFeishuLocalAutoPilot(params: {
     );
     await sleep(1000);
 
-    const createVerClicked = await findAndHighlightClick(wc, '创建版本', { pauseAfterMs: 1400 });
+    const createVerClicked = await findAndHighlightClick(wc, '创建版本', {
+      buttonsOnly: true,
+      pauseAfterMs: 1400
+    });
     if (createVerClicked.clicked) {
-      const verFields = (await wc.executeJavaScript(
-        `(() => {
+      const focusedVer = (await wc.executeJavaScript(
+        `(async () => {
           const verInp = Array.from(document.querySelectorAll('input[type="text"], input:not([type])'))
             .find((el) => {
               const p = (el.getAttribute('placeholder') || '') + ((el.closest('[class*="item"], [class*="field"]') && el.closest('[class*="item"], [class*="field"]').innerText) || '');
-              const r = el.getBoundingClientRect();
-              return r.width > 80 && /版本|1\\.0\\.0/.test(p) && !el.value;
+              return el.getBoundingClientRect().width > 80 && /版本|1\\.0\\.0/.test(p) && !el.value;
             });
-          const noteInp = Array.from(document.querySelectorAll('textarea'))
-            .find((el) => el.getBoundingClientRect().width > 120 && !el.value);
-          return {
-            verRect: verInp ? (() => { const r = verInp.getBoundingClientRect(); return { x: r.left, y: r.top, width: r.width, height: r.height }; })() : null,
-            noteRect: noteInp ? (() => { const r = noteInp.getBoundingClientRect(); return { x: r.left, y: r.top, width: r.width, height: r.height }; })() : null
-          };
+          if (!verInp || !(verInp instanceof HTMLElement)) return false;
+          const prev = verInp.style.outline;
+          verInp.style.outline = '2.5px solid #10b981';
+          verInp.focus({ preventScroll: true });
+          await new Promise((r) => setTimeout(r, 380));
+          verInp.style.outline = prev;
+          return true;
         })()`,
         true
-      )) as {
-        verRect: { x: number; y: number; width: number; height: number } | null;
-        noteRect: { x: number; y: number; width: number; height: number } | null;
-      };
+      )) as boolean;
+      if (focusedVer) {
+        await typeNativeIntoFocusedElement(wc, '1.0.0');
+      }
 
-      if (verFields.verRect) {
-        await typeNativeIntoRect(wc, verFields.verRect, '1.0.0');
+      const focusedNote = (await wc.executeJavaScript(
+        `(async () => {
+          const noteInp = Array.from(document.querySelectorAll('textarea'))
+            .find((el) => el.getBoundingClientRect().width > 120 && !el.value);
+          if (!noteInp || !(noteInp instanceof HTMLElement)) return false;
+          const prev = noteInp.style.outline;
+          noteInp.style.outline = '2.5px solid #10b981';
+          noteInp.focus({ preventScroll: true });
+          await new Promise((r) => setTimeout(r, 380));
+          noteInp.style.outline = prev;
+          return true;
+        })()`,
+        true
+      )) as boolean;
+      if (focusedNote) {
+        await typeNativeIntoFocusedElement(wc, 'MuseDeck 自动配置发布');
       }
-      if (verFields.noteRect) {
-        await typeNativeIntoRect(wc, verFields.noteRect, 'MuseDeck 自动配置发布');
-      }
-      await wc.executeJavaScript(`window.scrollBy({ top: 360, behavior: 'smooth' })`, true);
-      await sleep(700);
     }
 
     stepReport.push({
