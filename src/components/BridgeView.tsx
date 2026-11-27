@@ -38,12 +38,8 @@ export const BridgeView: React.FC<BridgeViewProps> = ({ state, feishuStatus }) =
   const [autoStepReport, setAutoStepReport] = useState<FeishuAutoStepReport[]>([]);
 
   useEffect(() => {
-    if (state.feishu.appId && state.feishu.appId !== appId) {
-      setAppId(state.feishu.appId);
-    }
-    if (state.feishu.appSecret && state.feishu.appSecret !== appSecret) {
-      setAppSecret(state.feishu.appSecret);
-    }
+    setAppId(state.feishu.appId || '');
+    setAppSecret(state.feishu.appSecret || '');
   }, [state.feishu.appId, state.feishu.appSecret]);
 
   useEffect(() => {
@@ -241,8 +237,7 @@ export const BridgeView: React.FC<BridgeViewProps> = ({ state, feishuStatus }) =
                         setAutoTip('正在打开本地飞书开放平台助手并执行本地脚本代配...');
                         try {
                           const r = await window.fmc.runFeishuAutoPilot({
-                            botName: botNameDraft,
-                            existingAppId: appId.trim() || undefined
+                            botName: botNameDraft
                           });
                           if (r.appId) setAppId(r.appId);
                           if (r.appSecret) setAppSecret(r.appSecret);

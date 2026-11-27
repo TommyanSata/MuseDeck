@@ -307,16 +307,19 @@ export class LocalBrowserController {
   private tailscaleTimer: NodeJS.Timeout | null = null;
   private feishuWc: WebContents | null = null;
   private onFeishuCredentialsSynced?: (appId: string, appSecret: string) => Promise<boolean>;
+  private onFeishuAppIdDetected?: (appId: string) => void;
   private onFeishuProgress?: (msg: string) => void;
 
   bindFeishuWebContents(
     wc: WebContents | null,
     onCredentialsSynced?: (appId: string, appSecret: string) => Promise<boolean>,
-    onProgress?: (msg: string) => void
+    onProgress?: (msg: string) => void,
+    onAppIdDetected?: (appId: string) => void
   ): void {
     this.feishuWc = wc;
     if (onCredentialsSynced) this.onFeishuCredentialsSynced = onCredentialsSynced;
     if (onProgress) this.onFeishuProgress = onProgress;
+    if (onAppIdDetected) this.onFeishuAppIdDetected = onAppIdDetected;
   }
 
   private resolveTargetWc(target?: 'default' | 'feishu', urlHint?: string): WebContents {
@@ -830,6 +833,9 @@ export class LocalBrowserController {
           await sleep(450);
         }
       }
+      if (appId) {
+        this.onFeishuAppIdDetected?.(appId);
+      }
       const snap = await this.snapshot('feishu');
       return {
         ok: Boolean(appId),
@@ -1021,22 +1027,10 @@ export class LocalBrowserController {
 
     if (op === 'configure_events') {
       const appId = readCurrentAppId();
+      if (appId) this.onFeishuAppIdDetected?.(appId);
       this.onFeishuProgress?.('🤖 Muse 正在配置「长连接接收事件」与 im.message.receive_v1...');
       await setFeishuHud(wc, '🤖 Muse 正在配置长连接模式与接收消息事件...', 'running');
-      if (appId) {
-        await navigateFeishuSection(wc, ['事件与回调'], ['事件配置', '订阅方式', '添加事件'], `https://open.feishu.cn/app/${appId}/event`);
-        await sleep(800);
-      }
-      const hasRadio = await this.execJsSafe<boolean>(
-        wc,
-        `(() => Array.from(document.querySelectorAll('input[type="radio"], .ud__radio, .semi-radio')).some((el) => el.getBoundingClientRect().width > 0))()`,
-        4000
-      );
-      if (!hasRadio) {
-        await findAndHighlightClick(wc, '^(编辑|修改|修改订阅方式)$', { pauseAfterMs: 600 });
-      }
-      await findAndHighlightClick(wc, '使用长连接接收事件', { pauseAfterMs: 600 });
-      await findAndHighlightClick(wc, '^保存$', { buttonsOnly: true, pauseAfterMs: 1400 });
+      const wsModeRes = await enableFeishuLongConnectionOnPage(wc, appId);
 
       let eventAdded = await this.execJsSafe<boolean>(
         wc,
@@ -1081,7 +1075,19 @@ export class LocalBrowserController {
         }
       }
       const snap = await this.snapshot('feishu');
-      return { ok: eventAdded, eventSubscribed: eventAdded, snapshot: snap };
+      return {
+        ok: wsModeRes.modeSaved && eventAdded,
+        longConnectionModeSaved: wsModeRes.modeSaved,
+        wsErrorToast: wsModeRes.wsErrorToast,
+        eventSubscribed: eventAdded,
+        note:
+          wsModeRes.modeSaved && eventAdded
+            ? 'Long-connection event mode and im.message.receive_v1 are both configured! Proceed to prepare_version.'
+            : wsModeRes.wsErrorToast
+              ? 'Feishu reported local WebSocket not detected yet. Call sync_local_bridge once more, wait 2s, then retry configure_events.'
+              : 'Inspect snapshot.elements if an extra Save or confirm click is needed.',
+        snapshot: snap
+      };
     }
 
     if (op === 'prepare_version') {
@@ -1137,90 +1143,28 @@ export class LocalBrowserController {
         };
       }
       const appId = m[1];
-      const returnUrl = wc.getURL();
-      this.onFeishuProgress?.('🔒 本地隐私护盾正在后台自动绑定凭证并连接飞书 WebSocket（密钥零外泄）...');
-      await setFeishuHud(wc, '🔒 本地隐私护盾正在自动连接本地飞书长连接（Muse 零接触密钥）...', 'running');
+      this.onFeishuAppIdDetected?.(appId);
+      this.onFeishuProgress?.(
+        `🔒 本地隐私护盾正在读取新应用 (${appId}) 凭证并连接飞书 WebSocket（密钥零外泄）...`
+      );
+      await setFeishuHud(wc, '🔒 本地隐私护盾正在自动提取凭证并连接飞书长连接...', 'running');
 
-      if (!returnUrl.includes('/baseinfo')) {
-        await wc.loadURL(`https://open.feishu.cn/app/${appId}/baseinfo`);
-        await waitPageSettled(wc, 1200);
-        await waitForPageKeyword(wc, ['App ID', 'App Secret', '凭证与基础信息'], 6500);
-      }
-
-      let secret = '';
-      const prevClip = clipboard.readText();
-      try {
-        clipboard.writeText('');
-        const meta = (await wc.executeJavaScript(
-          `(() => {
-            const labels = Array.from(document.querySelectorAll('div, span, td, th, label'));
-            const secretLabel = labels.find((el) => (el.innerText || '').trim() === 'App Secret');
-            const row =
-              (secretLabel && secretLabel.closest('tr, [class*="row"], [class*="item"], [class*="field"], [class*="secret"]')) ||
-              (secretLabel && secretLabel.parentElement && secretLabel.parentElement.parentElement);
-            if (!row) return { direct: '', count: 0 };
-            const rowTxt = row.innerText || '';
-            const directMatch = rowTxt.match(/\\b([a-zA-Z0-9]{28,40})\\b/g) || [];
-            const validDirect = directMatch.find((s) => !s.startsWith('cli_') && /[a-zA-Z]/.test(s) && /\\d/.test(s)) || '';
-            const btns = Array.from(row.querySelectorAll('button, [role="button"], span[class*="icon"], svg'))
-              .map((el) => el.closest('button, [role="button"]') || el)
-              .filter((el, idx, arr) => {
-                if (!(el instanceof HTMLElement) || arr.indexOf(el) !== idx) return false;
-                const t = (el.innerText || el.getAttribute('title') || el.getAttribute('aria-label') || '').trim();
-                if (/重置|Reset/i.test(t)) return false;
-                const r = el.getBoundingClientRect();
-                return r.width >= 12 && r.width <= 80 && r.height >= 12 && r.height <= 48;
-              })
-              .slice(0, 3);
-            btns.forEach((b, i) => b.setAttribute('data-fmc-priv-sec', String(i)));
-            return { direct: validDirect, count: btns.length };
-          })()`,
-          true
-        )) as { direct: string; count: number };
-
-        if (meta.direct) {
-          secret = meta.direct;
-        } else {
-          for (let idx = 0; idx < meta.count; idx++) {
-            await wc.executeJavaScript(
-              `(() => {
-                const b = document.querySelector('[data-fmc-priv-sec="${idx}"]');
-                if (b instanceof HTMLElement) b.click();
-              })()`,
-              true
-            );
-            await sleep(450);
-            const clipVal = clipboard.readText().trim();
-            if (/^[a-zA-Z0-9]{24,44}$/.test(clipVal) && !clipVal.startsWith('cli_')) {
-              secret = clipVal;
-              break;
-            }
-            const domSec = (await wc.executeJavaScript(
-              `(() => {
-                const matches = (document.body?.innerText || '').match(/\\b([a-zA-Z0-9]{28,40})\\b/g) || [];
-                return matches.find((s) => !s.startsWith('cli_') && /[a-zA-Z]/.test(s) && /\\d/.test(s)) || '';
-              })()`,
-              true
-            )) as string;
-            if (domSec) {
-              secret = domSec;
-              break;
-            }
-          }
-        }
-      } finally {
-        clipboard.writeText(prevClip);
-      }
+      const secret = await extractFeishuAppSecretLocally(wc, appId);
 
       let connected = false;
       if (secret && this.onFeishuCredentialsSynced) {
         connected = await this.onFeishuCredentialsSynced(appId, secret);
-        await sleep(1200);
+        // Give Feishu cloud 2s to register our active WebSocket client before Step 5 clicks Save!
+        await sleep(2000);
       }
 
       if (connected) {
-        this.onFeishuProgress?.('✅ 本地隐私护盾已完成凭证托管并连上飞书 WebSocket 长连接！');
-        await setFeishuHud(wc, '✅ 本地飞书 WebSocket 长连接已就绪（密钥全程仅存本机）', 'ok');
+        this.onFeishuProgress?.(`✅ 已自动填入新机器人 (${appId}) 凭证并成功建立飞书 WebSocket 长连接！`);
+        await setFeishuHud(wc, `✅ 新机器人 (${appId}) 本地长连接已在线！`, 'ok');
+      } else {
+        this.onFeishuProgress?.(
+          `⚠️ 已定位新应用 (${appId})，但尚未连上长连接，请在凭证页点复制 App Secret 粘贴连接`
+        );
       }
 
       const snap = await this.snapshot('feishu');
@@ -1230,8 +1174,8 @@ export class LocalBrowserController {
         localWebSocketConnected: connected,
         privacyShield: 'ACTIVE_ZERO_SECRET_EXPOSED',
         note: connected
-          ? 'Local Feishu WebSocket bridge is now ONLINE! You may now proceed to 事件与回调 (Event Subscriptions) -> select 使用长连接接收事件 -> Save -> add im.message.receive_v1.'
-          : 'Could not auto-connect local WebSocket yet; continue configuring UI sections and remind user to click Connect in MuseDeck if needed.',
+          ? 'Local Feishu WebSocket bridge is now ONLINE for this new app! Proceed immediately to configure_events.'
+          : 'Could not auto-connect local WebSocket yet; remind user to copy App Secret into MuseDeck and click Connect before saving long-connection mode.',
         snapshot: snap
       };
     }
@@ -1579,7 +1523,7 @@ async function findAndHighlightClick(
         const style = window.getComputedStyle(btn);
         if (style.display === 'none' || style.visibility === 'hidden' || style.pointerEvents === 'none') continue;
         const txt = (btn.innerText || '').replace(/\\s+/g, ' ').trim();
-        if (!txt || txt.length > 40) continue;
+        if (!txt || txt.length > 160) continue;
         const matched = exact ? txt === exactText : re.test(txt);
         if (!matched) continue;
         const r = btn.getBoundingClientRect();
@@ -1593,7 +1537,7 @@ async function findAndHighlightClick(
         btn.style.outline = '2.5px solid #10b981';
         btn.style.outlineOffset = '2px';
         btn.style.boxShadow = '0 0 0 4px rgba(16, 185, 129, 0.22)';
-        await new Promise((resolve) => setTimeout(resolve, 520));
+        await new Promise((resolve) => setTimeout(resolve, 420));
         btn.style.outline = prevOutline;
         btn.style.outlineOffset = prevOffset;
         btn.style.boxShadow = prevShadow;
@@ -1601,7 +1545,7 @@ async function findAndHighlightClick(
         btn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
         btn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
         btn.click();
-        return { clicked: true, label: txt };
+        return { clicked: true, label: txt.slice(0, 48) };
       }
       return null;
     })()`,
@@ -1611,6 +1555,283 @@ async function findAndHighlightClick(
   if (!clickRes?.clicked) return { clicked: false, label: '' };
   await sleep(options?.pauseAfterMs ?? 950);
   return { clicked: true, label: clickRes.label };
+}
+
+/**
+ * Reliably extracts App Secret on Feishu's /baseinfo page 100% locally in Electron:
+ * Supports <svg> eye/copy icons (which are SVGElement, not HTMLElement!) and uses real
+ * Chromium hardware clicks (isTrusted=true) so Feishu's navigator.clipboard.writeText & eye toggle succeed.
+ */
+async function extractFeishuAppSecretLocally(wc: WebContents, appId: string): Promise<string> {
+  if (!wc.getURL().includes('/baseinfo')) {
+    await navigateFeishuSection(
+      wc,
+      ['凭证与基础信息'],
+      ['App ID', 'App Secret'],
+      `https://open.feishu.cn/app/${appId}/baseinfo`
+    );
+  } else {
+    await waitForPageKeyword(wc, ['App ID', 'App Secret'], 6500);
+  }
+  await sleep(700);
+
+  const prevClip = clipboard.readText();
+  try {
+    const scanInfo = (await wc.executeJavaScript(
+      `(() => {
+        const all = Array.from(document.querySelectorAll('div, span, td, th, label, p'));
+        const secretLabel = all.find(
+          (el) => el instanceof HTMLElement && el.children.length === 0 && (el.innerText || '').trim() === 'App Secret'
+        ) || all.find((el) => el instanceof HTMLElement && (el.innerText || '').trim() === 'App Secret');
+        if (!secretLabel || !(secretLabel instanceof HTMLElement)) {
+          return { direct: '', points: [] };
+        }
+        const lr = secretLabel.getBoundingClientRect();
+        if (lr.top < 30 || lr.bottom > window.innerHeight - 60) {
+          secretLabel.scrollIntoView({ behavior: 'instant', block: 'center' });
+        }
+        const lblRect = secretLabel.getBoundingClientRect();
+        const container =
+          secretLabel.closest('tr, [class*="row"], [class*="item"], [class*="field"], [class*="secret"], [class*="card"]') ||
+          secretLabel.parentElement?.parentElement ||
+          document.body;
+        const cTxt = (container && container.innerText) || '';
+        const directMatches = cTxt.match(/\\b([A-Za-z0-9]{26,44})\\b/g) || [];
+        const validDirect =
+          directMatches.find((s) => !s.startsWith('cli_') && /[A-Za-z]/.test(s) && /\\d/.test(s)) || '';
+
+        // Collect all clickable icon candidates (including <svg>!) near App Secret
+        const rawCandidates = Array.from(
+          document.querySelectorAll('svg, button, [role="button"], span[class*="icon" i], i[class*="icon" i]')
+        );
+        const pts = [];
+        for (const node of rawCandidates) {
+          const boxEl = node.closest('button, [role="button"]') || (node instanceof HTMLElement ? node : node.parentElement);
+          if (!boxEl || !(boxEl instanceof HTMLElement)) continue;
+          const st = window.getComputedStyle(boxEl);
+          if (st.display === 'none' || st.visibility === 'hidden') continue;
+          const txt = (
+            boxEl.innerText ||
+            boxEl.getAttribute('title') ||
+            boxEl.getAttribute('aria-label') ||
+            (boxEl.parentElement && boxEl.parentElement.innerText) ||
+            ''
+          ).trim();
+          if (/重置|Reset|刷新|Regenerate/i.test(txt)) continue;
+          const r = boxEl.getBoundingClientRect();
+          if (r.width < 10 || r.width > 76 || r.height < 10 || r.height > 48) continue;
+          // Must lie within the App Secret horizontal/vertical zone (not left of App Secret label!)
+          if (r.left < lblRect.left - 8) continue;
+          if (r.top < lblRect.top - 24 || r.bottom > lblRect.bottom + 64) continue;
+          const cx = Math.round(r.left + r.width / 2);
+          const cy = Math.round(r.top + r.height / 2);
+          if (!pts.some((p) => Math.hypot(p.x - cx, p.y - cy) < 10)) {
+            pts.push({ x: cx, y: cy, w: Math.round(r.width), h: Math.round(r.height) });
+          }
+        }
+        pts.sort((a, b) => a.x - b.x);
+        return { direct: validDirect, points: pts.slice(0, 4) };
+      })()`,
+      true
+    )) as { direct: string; points: Array<{ x: number; y: number; w: number; h: number }> };
+
+    if (scanInfo.direct) {
+      return scanInfo.direct;
+    }
+
+    for (const pt of scanInfo.points) {
+      clipboard.writeText('');
+      await highlightRectOnPage(
+        wc,
+        { x: pt.x - pt.w / 2, y: pt.y - pt.h / 2, width: pt.w, height: pt.h },
+        320
+      );
+      await clickHardwareAt(wc, pt.x, pt.y);
+      await sleep(550);
+
+      const clipVal = clipboard.readText().trim();
+      if (/^[A-Za-z0-9_-]{24,48}$/.test(clipVal) && !clipVal.startsWith('cli_')) {
+        return clipVal;
+      }
+
+      const revealed = (await wc.executeJavaScript(
+        `(() => {
+          const all = Array.from(document.querySelectorAll('div, span, td, th, label, input'));
+          const secretLabel = all.find((el) => el instanceof HTMLElement && (el.innerText || '').trim() === 'App Secret');
+          const scope =
+            (secretLabel && secretLabel.closest('tr, [class*="row"], [class*="item"], [class*="field"], [class*="card"]')) ||
+            document.body;
+          const inputVals = Array.from(scope.querySelectorAll('input')).map((i) => i.value || '').join(' ');
+          const combined = ((scope && scope.innerText) || '') + ' ' + inputVals;
+          const matches = combined.match(/\\b([A-Za-z0-9]{26,44})\\b/g) || [];
+          return matches.find((s) => !s.startsWith('cli_') && /[A-Za-z]/.test(s) && /\\d/.test(s)) || '';
+        })()`,
+        true
+      )) as string;
+      if (revealed) {
+        return revealed;
+      }
+    }
+    return '';
+  } finally {
+    clipboard.writeText(prevClip);
+  }
+}
+
+/**
+ * Reliably switches Feishu's Event Subscription mode to WebSocket ("使用长连接接收事件") and saves it.
+ */
+async function enableFeishuLongConnectionOnPage(
+  wc: WebContents,
+  appId: string
+): Promise<{ modeSaved: boolean; wsErrorToast: boolean }> {
+  if (appId) {
+    await navigateFeishuSection(
+      wc,
+      ['事件与回调'],
+      ['事件配置', '订阅方式', '添加事件'],
+      `https://open.feishu.cn/app/${appId}/event`
+    );
+    await sleep(900);
+  }
+
+  // Step 1: If radio inputs aren't visible yet, click Edit button or pencil <svg> near 订阅方式 / 事件配置
+  const editTarget = (await wc.executeJavaScript(
+    `(() => {
+      const radios = Array.from(document.querySelectorAll('input[type="radio"], .ud__radio, .semi-radio, .arco-radio'))
+        .filter((el) => el.getBoundingClientRect().width > 0);
+      if (radios.length > 0) return { alreadyEditable: true, pt: null };
+
+      const editBtn = Array.from(document.querySelectorAll('button, [role="button"], a, span'))
+        .find((el) => el instanceof HTMLElement && /^(编辑|修改|修改订阅方式)$/.test((el.innerText || '').trim()) && el.getBoundingClientRect().width > 12);
+      if (editBtn instanceof HTMLElement) {
+        const r = editBtn.getBoundingClientRect();
+        editBtn.click();
+        return { alreadyEditable: false, pt: { x: r.left + r.width / 2, y: r.top + r.height / 2 } };
+      }
+
+      // Fallback: pencil <svg> icon on the same header row as 订阅方式 or 事件配置
+      const hdr = Array.from(document.querySelectorAll('div, span, h3, h4'))
+        .find((el) => el instanceof HTMLElement && el.children.length === 0 && /^(订阅方式|事件配置)$/.test((el.innerText || '').trim()));
+      if (hdr instanceof HTMLElement) {
+        const hr = hdr.getBoundingClientRect();
+        const svg = Array.from(document.querySelectorAll('svg')).find((s) => {
+          const sr = s.getBoundingClientRect();
+          return sr.width >= 10 && sr.width <= 36 && Math.abs(sr.top - hr.top) < 28 && sr.left > hr.right;
+        });
+        if (svg) {
+          const sr = svg.getBoundingClientRect();
+          return { alreadyEditable: false, pt: { x: sr.left + sr.width / 2, y: sr.top + sr.height / 2 } };
+        }
+      }
+      return { alreadyEditable: false, pt: null };
+    })()`,
+    true
+  )) as { alreadyEditable: boolean; pt: { x: number; y: number } | null };
+
+  if (!editTarget.alreadyEditable && editTarget.pt) {
+    await clickHardwareAt(wc, editTarget.pt.x, editTarget.pt.y);
+    await sleep(750);
+  }
+
+  // Step 2: Select the "使用长连接接收事件" radio option (ignoring long description text inside <label>!)
+  const radioPt = (await wc.executeJavaScript(
+    `(() => {
+      const labels = Array.from(document.querySelectorAll('label, [class*="radio"], div, span'));
+      const exactSpan = labels.find(
+        (el) => el instanceof HTMLElement && el.children.length === 0 && (el.innerText || '').trim().includes('使用长连接接收事件')
+      );
+      const radioContainer =
+        (exactSpan && exactSpan.closest('label, [class*="radio"]')) ||
+        labels.find((el) => el instanceof HTMLElement && (el.innerText || '').includes('使用长连接接收事件') && el.getBoundingClientRect().height < 140);
+      const target = radioContainer || exactSpan;
+      if (!target || !(target instanceof HTMLElement)) return null;
+      const r = target.getBoundingClientRect();
+      if (r.top < 36 || r.bottom > window.innerHeight - 36) {
+        target.scrollIntoView({ behavior: 'instant', block: 'center' });
+      }
+      const nr = target.getBoundingClientRect();
+      const radioInp = target.querySelector('input[type="radio"], .ud__radio-inner, .semi-radio-inner');
+      if (radioInp instanceof HTMLElement) radioInp.click();
+      target.click();
+      return { x: nr.left + Math.min(24, nr.width / 2), y: nr.top + Math.min(22, nr.height / 2), w: nr.width, h: nr.height };
+    })()`,
+    true
+  )) as { x: number; y: number; w: number; h: number } | null;
+
+  if (radioPt) {
+    await highlightRectOnPage(wc, { x: radioPt.x - 12, y: radioPt.y - 12, width: 28, height: 28 }, 380);
+    await clickHardwareAt(wc, radioPt.x, radioPt.y);
+    await sleep(650);
+  }
+
+  // Step 3: Click Save button (with automatic 2.5s retry if Feishu cloud WS registration lagged slightly)
+  const clickSaveOnce = async () => {
+    const savePt = (await wc.executeJavaScript(
+      `(() => {
+        const btns = Array.from(document.querySelectorAll('button')).filter((b) => {
+          if (b.hasAttribute('disabled')) return false;
+          const t = (b.innerText || '').replace(/\\s+/g, '').trim();
+          const r = b.getBoundingClientRect();
+          return t === '保存' && r.width >= 36 && r.height >= 20;
+        });
+        if (btns.length === 0) return null;
+        const btn = btns[0];
+        const r = btn.getBoundingClientRect();
+        if (r.top < 36 || r.bottom > window.innerHeight - 36) {
+          btn.scrollIntoView({ behavior: 'instant', block: 'nearest' });
+        }
+        const nr = btn.getBoundingClientRect();
+        btn.click();
+        return { x: nr.left + nr.width / 2, y: nr.top + nr.height / 2, w: nr.width, h: nr.height };
+      })()`,
+      true
+    )) as { x: number; y: number; w: number; h: number } | null;
+    if (savePt) {
+      await highlightRectOnPage(
+        wc,
+        { x: savePt.x - savePt.w / 2, y: savePt.y - savePt.h / 2, width: savePt.w, height: savePt.h },
+        380
+      );
+      await clickHardwareAt(wc, savePt.x, savePt.y);
+    }
+    await sleep(1800);
+  };
+
+  await clickSaveOnce();
+
+  let check = (await wc.executeJavaScript(
+    `(() => {
+      const txt = document.body?.innerText || '';
+      const wsErrorToast = txt.includes('未检测到应用连接信息') || txt.includes('请先建立长连接');
+      const hasSaveBtnStill = Array.from(document.querySelectorAll('button')).some(
+        (b) => (b.innerText || '').replace(/\\s+/g, '').trim() === '保存' && b.getBoundingClientRect().width > 0
+      );
+      return {
+        wsErrorToast,
+        modeSaved: !wsErrorToast && txt.includes('使用长连接接收事件') && !hasSaveBtnStill
+      };
+    })()`,
+    true
+  )) as { wsErrorToast: boolean; modeSaved: boolean };
+
+  if (check.wsErrorToast) {
+    await sleep(2500);
+    await clickSaveOnce();
+    check = (await wc.executeJavaScript(
+      `(() => {
+        const txt = document.body?.innerText || '';
+        const wsErrorToast = txt.includes('未检测到应用连接信息') || txt.includes('请先建立长连接');
+        return {
+          wsErrorToast,
+          modeSaved: !wsErrorToast && txt.includes('使用长连接接收事件')
+        };
+      })()`,
+      true
+    )) as { wsErrorToast: boolean; modeSaved: boolean };
+  }
+
+  return check;
 }
 
 /**
@@ -2091,94 +2312,13 @@ export async function runFeishuLocalAutoPilot(params: {
     }
 
     // ==================== STEP 4: EXTRACT CREDENTIALS & CONNECT WEBSOCKET ====================
-    await emitStep('⚡ [4/6] 正在读取 App ID 与 App Secret 并建立本地飞书长连接...');
-    await navigateFeishuSection(
-      wc,
-      ['凭证与基础信息'],
-      ['App ID', 'App Secret'],
-      `https://open.feishu.cn/app/${appId}/baseinfo`
-    );
-    await sleep(900);
-
-    let extractedSecret = '';
-    const prevClipForSecret = clipboard.readText();
-    try {
-      clipboard.writeText('');
-      const secretMeta = (await wc.executeJavaScript(
-        `(() => {
-          const labels = Array.from(document.querySelectorAll('div, span, td, th, label'));
-          const secretLabel = labels.find((el) => (el.innerText || '').trim() === 'App Secret');
-          const row =
-            (secretLabel && secretLabel.closest('tr, [class*="row"], [class*="item"], [class*="field"], [class*="secret"]')) ||
-            (secretLabel && secretLabel.parentElement && secretLabel.parentElement.parentElement);
-          if (!row) return { directText: '', count: 0 };
-          const rowTxt = (row.innerText || '');
-          const directMatch = rowTxt.match(/\\b([a-zA-Z0-9]{28,40})\\b/g) || [];
-          const validDirect = directMatch.find((s) => !s.startsWith('cli_') && /[a-zA-Z]/.test(s) && /\\d/.test(s)) || '';
-          const btns = Array.from(row.querySelectorAll('button, [role="button"], span[class*="icon"], svg'))
-            .map((el) => el.closest('button, [role="button"]') || el)
-            .filter((el, idx, arr) => {
-              if (!(el instanceof HTMLElement)) return false;
-              if (arr.indexOf(el) !== idx) return false;
-              const t = (el.innerText || el.getAttribute('title') || el.getAttribute('aria-label') || '').trim();
-              if (/重置|Reset/i.test(t)) return false;
-              const r = el.getBoundingClientRect();
-              return r.width >= 12 && r.width <= 80 && r.height >= 12 && r.height <= 48;
-            })
-            .slice(0, 3);
-          btns.forEach((b, i) => b.setAttribute('data-fmc-sec-btn', String(i)));
-          return { directText: validDirect, count: btns.length };
-        })()`,
-        true
-      )) as { directText: string; count: number };
-
-      if (secretMeta.directText) {
-        extractedSecret = secretMeta.directText;
-      } else {
-        for (let idx = 0; idx < secretMeta.count; idx++) {
-          await wc.executeJavaScript(
-            `(async () => {
-              const b = document.querySelector('[data-fmc-sec-btn="${idx}"]');
-              if (!(b instanceof HTMLElement)) return;
-              const prev = b.style.outline;
-              b.style.outline = '2px solid #10b981';
-              await new Promise((r) => setTimeout(r, 400));
-              b.style.outline = prev;
-              b.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
-              b.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
-              b.click();
-            })()`,
-            true
-          );
-          await sleep(550);
-
-          const clipVal = clipboard.readText().trim();
-          if (/^[a-zA-Z0-9]{24,44}$/.test(clipVal) && !clipVal.startsWith('cli_')) {
-            extractedSecret = clipVal;
-            break;
-          }
-          const domSecret = (await wc.executeJavaScript(
-            `(() => {
-              const txt = document.body?.innerText || '';
-              const matches = txt.match(/\\b([a-zA-Z0-9]{28,40})\\b/g) || [];
-              return matches.find((s) => !s.startsWith('cli_') && /[a-zA-Z]/.test(s) && /\\d/.test(s)) || '';
-            })()`,
-            true
-          )) as string;
-          if (domSecret) {
-            extractedSecret = domSecret;
-            break;
-          }
-        }
-      }
-    } finally {
-      clipboard.writeText(prevClipForSecret);
-    }
+    await emitStep(`⚡ [4/6] 正在读取新应用 (${appId}) 的 App Secret 并建立本地飞书长连接...`);
+    const extractedSecret = await extractFeishuAppSecretLocally(wc, appId);
 
     let wsConnectedOk = false;
     if (extractedSecret) {
       wsConnectedOk = await onCredentialsReady(appId, extractedSecret);
-      await sleep(1800);
+      await sleep(2000);
       completedSteps.push(
         wsConnectedOk
           ? `已提取凭证并成功连上飞书长连接 (${appId})`
@@ -2201,37 +2341,9 @@ export async function runFeishuLocalAutoPilot(params: {
 
     // ==================== STEP 5: WEBSOCKET EVENT MODE & im.message.receive_v1 ====================
     await emitStep('⚡ [5/6] 正在配置「使用长连接接收事件」并添加接收消息事件...');
-    await navigateFeishuSection(
-      wc,
-      ['事件与回调'],
-      ['事件配置', '订阅方式', '添加事件'],
-      `https://open.feishu.cn/app/${appId}/event`
-    );
-    await sleep(1000);
-
-    const wsModeState = (await wc.executeJavaScript(
-      `(() => {
-        const txt = document.body?.innerText || '';
-        const hasRadioVisible = Array.from(document.querySelectorAll('input[type="radio"], .ud__radio, .semi-radio'))
-          .some((el) => el.getBoundingClientRect().width > 0);
-        return { txtHasWs: txt.includes('使用长连接接收事件'), hasRadioVisible };
-      })()`,
-      true
-    )) as { txtHasWs: boolean; hasRadioVisible: boolean };
-
-    if (!wsModeState.hasRadioVisible) {
-      await findAndHighlightClick(wc, '^(编辑|修改|修改订阅方式)$', { pauseAfterMs: 700 });
-    }
-    await findAndHighlightClick(wc, '使用长连接接收事件', { pauseAfterMs: 700 });
-    const savedWsBtn = await findAndHighlightClick(wc, '^保存$', { pauseAfterMs: 1800 });
-
-    const wsErrorToast = (await wc.executeJavaScript(
-      `(() => {
-        const txt = document.body?.innerText || '';
-        return txt.includes('未检测到应用连接信息') || txt.includes('请先建立长连接');
-      })()`,
-      true
-    )) as boolean;
+    const wsModeCheck = await enableFeishuLongConnectionOnPage(wc, appId);
+    const wsErrorToast = wsModeCheck.wsErrorToast;
+    const savedWsBtn = { clicked: wsModeCheck.modeSaved };
 
     let eventSubscribed = (await wc.executeJavaScript(
       `(() => (document.body?.innerText || '').includes('im.message.receive_v1'))()`,

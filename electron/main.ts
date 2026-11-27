@@ -1028,6 +1028,7 @@ function registerIpcHandlers(): void {
   ipcMain.handle('onboarding:reset', () => {
     const st = store.update((s) => {
       s.onboardingCompleted = false;
+      s.muse.tunnelVerified = false;
     });
     hideAllEmbeddedViews();
     broadcast('state:changed', st);
@@ -2463,6 +2464,24 @@ function registerIpcHandlers(): void {
     return feishuPopupWin.webContents;
   };
 
+  // Reset stale old-bot connection & credentials whenever user starts configuring a new/different Feishu app
+  const syncDetectedFeishuAppId = (detectedAppId: string) => {
+    const prev = store.getState().feishu;
+    if (prev.appId === detectedAppId) return;
+    feishu.disconnect();
+    const next = store.update((s) => {
+      s.feishu.appId = detectedAppId;
+      s.feishu.appSecret = '';
+      s.feishu.verified = false;
+      s.feishu.verifiedAppId = undefined;
+      s.feishu.verifiedAt = undefined;
+      s.feishu.lastChatId = undefined;
+      s.feishu.lastSenderOpenId = undefined;
+      s.feishu.lastPingMessage = undefined;
+    });
+    broadcast('state:changed', next);
+  };
+
   ipcMain.handle(
     'autopilot:feishu',
     async (
@@ -2470,11 +2489,15 @@ function registerIpcHandlers(): void {
       params?: { botName?: string; botDesc?: string; existingAppId?: string }
     ) => {
       const targetWc = await ensureFeishuConsoleWc();
+      const urlAppId = targetWc.getURL().match(/\/app\/(cli_[a-zA-Z0-9]+)/)?.[1] || '';
+      if (urlAppId !== store.getState().feishu.appId) {
+        syncDetectedFeishuAppId(urlAppId);
+      }
       return runFeishuLocalAutoPilot({
         wc: targetWc,
         botName: params?.botName,
         botDesc: params?.botDesc,
-        existingAppId: params?.existingAppId,
+        existingAppId: urlAppId || undefined,
         onProgress: (msg) => {
           broadcast('autopilot:feishuProgress', { message: msg });
         },
@@ -2529,6 +2552,12 @@ function registerIpcHandlers(): void {
         };
       }
 
+      // Immediately clear old bot credentials & disconnect old WS if creating a new app or viewing a different app!
+      const urlAppId = targetWc.getURL().match(/\/app\/(cli_[a-zA-Z0-9]+)/)?.[1] || '';
+      if (urlAppId !== store.getState().feishu.appId) {
+        syncDetectedFeishuAppId(urlAppId);
+      }
+
       localBrowser.bindFeishuWebContents(
         targetWc,
         async (extractedAppId, extractedSecret) => {
@@ -2537,6 +2566,9 @@ function registerIpcHandlers(): void {
         },
         (msg) => {
           broadcast('autopilot:feishuProgress', { message: msg });
+        },
+        (newAppId) => {
+          syncDetectedFeishuAppId(newAppId);
         }
       );
 

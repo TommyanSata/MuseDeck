@@ -144,12 +144,8 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
   const [avatarTip, setAvatarTip] = useState('');
 
   useEffect(() => {
-    if (state.feishu.appId && state.feishu.appId !== appId) {
-      setAppId(state.feishu.appId);
-    }
-    if (state.feishu.appSecret && state.feishu.appSecret !== appSecret) {
-      setAppSecret(state.feishu.appSecret);
-    }
+    setAppId(state.feishu.appId || '');
+    setAppSecret(state.feishu.appSecret || '');
   }, [state.feishu.appId, state.feishu.appSecret]);
 
   useEffect(() => {
@@ -241,8 +237,7 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
     setFeishuAutoTip('正在检查左侧飞书开放平台登录态并执行本地脚本代配...');
     try {
       const res = await window.fmc.runFeishuAutoPilot({
-        botName: botNameDraft,
-        existingAppId: appId.trim() || undefined
+        botName: botNameDraft
       });
       if (res.appId) setAppId(res.appId);
       if (res.appSecret) setAppSecret(res.appSecret);

@@ -31,6 +31,14 @@ export interface WhatsNewInfo {
 }
 
 export const BUILTIN_RELEASE_HIGHLIGHTS: Record<string, { title: string; highlights: string[] }> = {
+  '0.7.3': {
+    title: '修复飞书代配长连接自动开启、新机器人凭证覆盖与第 4 步状态显示',
+    highlights: [
+      '修复飞书凭证页 SVG 小眼睛/复制图标识别与原生硬件点击（isTrusted），确保新建机器人的 App ID 与 Secret 100% 自动提取并覆盖旧机器人信息',
+      '修复飞书「事件与回调」页长连接单选框因说明文字超长被跳过的问题，支持长连接未及时同步时自动重试保存',
+      '启动新机器人代配时立即断开旧机器人连接并清空旧验证状态，彻底解决第 4 步一直误显示「已完成」的问题'
+    ]
+  },
   '0.7.2': {
     title: '彻底解决新装节点首次连通 Muse 出现状态 000 超时的问题',
     highlights: [

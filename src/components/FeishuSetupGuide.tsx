@@ -53,6 +53,7 @@ export const FeishuSetupGuide: React.FC<FeishuSetupGuideProps> = ({
   feishuConnected = false,
   feishuVerified = false,
   appId = '',
+  appSecret = '',
   onNavigateFeishuUrl,
   compact = false
 }) => {
@@ -87,14 +88,15 @@ export const FeishuSetupGuide: React.FC<FeishuSetupGuideProps> = ({
     }
   };
 
-  // Strict step status: only current App ID's live connection & live ping can auto-complete step 4 & 6
+  // Strict step status: only current App ID's live credentials + live connection can auto-complete step 4 & 6
+  const hasCompleteCreds = Boolean(validCliAppId && appSecret.trim());
   const stepDone: Record<number, boolean> = {
     1: Boolean(manualChecked[1]),
     2: Boolean(manualChecked[2]),
     3: Boolean(manualChecked[3]),
-    4: Boolean(feishuConnected || manualChecked[4]),
-    5: Boolean(feishuVerified || manualChecked[5]),
-    6: Boolean(feishuVerified || manualChecked[6])
+    4: Boolean((hasCompleteCreds && feishuConnected) || manualChecked[4]),
+    5: Boolean((hasCompleteCreds && feishuVerified) || manualChecked[5]),
+    6: Boolean((hasCompleteCreds && feishuVerified) || manualChecked[6])
   };
 
   const completedCount = [1, 2, 3, 4, 5, 6].filter((n) => stepDone[n]).length;
