@@ -1663,10 +1663,27 @@ function registerIpcHandlers(): void {
   });
 
   ipcMain.handle('muse:testSitePermission', async () => {
+    // Auto-start Tailscale if tunnel process isn't running yet when saved URL is .ts.net!
+    let curTun = tunnel?.getStatus();
+    const savedUrl = (store.getState().controlApi.tunnelUrl || '').trim();
+    if (
+      curTun?.state !== 'running' &&
+      (!savedUrl || savedUrl.includes('.ts.net')) &&
+      tunnel
+    ) {
+      const tsStateDir = path.join(app.getPath('userData'), 'fmc-data', 'tsnet-state');
+      if (fs.existsSync(tsStateDir)) {
+        curTun = await tunnel.startTailscale();
+      }
+    }
+
     const st = store.getState();
-    const tunnelUrl = (tunnel?.getStatus().url || st.controlApi.tunnelUrl || '').trim().replace(/\/+$/, '');
+    const tunnelUrl = (curTun?.url || st.controlApi.tunnelUrl || '').trim().replace(/\/+$/, '');
     if (!tunnelUrl) {
-      return { ok: false, message: '请先在上一步启动公网 443 隧道并拿到域名' };
+      return { ok: false, message: '请先在上一步点击启动公网 443 隧道并拿到域名' };
+    }
+    if (tunnel && tunnelUrl.startsWith('https://')) {
+      await tunnel.warmupPublicTunnelUrl(tunnelUrl, 16000);
     }
     store.update((s) => {
       s.muse.tunnelVerified = false;
@@ -1674,12 +1691,12 @@ function registerIpcHandlers(): void {
     broadcast('state:changed', store.getState());
     // Ensure latest protocol is synced first, then ask Muse to hit /api/v1/clis immediately
     await syncLatestBriefToMuse(true);
-    const probeMsg = `【MuseDeck 初始站点权限与连通性预检】请立即发起一次 GET ${tunnelUrl}/api/v1/clis 请求（携带 Header: Authorization: Bearer ${st.controlApi.token}），不要执行其他任务，拿到 200 后简短回复「握手成功」即可。`;
+    const probeMsg = `【MuseDeck 初始站点权限与连通性预检】请立即发起一次 GET ${tunnelUrl}/api/v1/clis 请求（携带 Header: Authorization: Bearer ${st.controlApi.token}，超时请设为 20 秒），不要执行其他任务，拿到 200 后简短回复「握手成功」即可。`;
     const sent = await sendTextToMuseChat(probeMsg);
     return sent.ok
       ? {
           ok: true,
-          message: '已向 Muse 发起权限预检请求！留意左侧网页，若弹出外部站点提示请点击「总是允许此站点」'
+          message: '已预热公网 HTTPS 证书并向 Muse 发起权限预检！留意左侧网页，若弹出外部站点提示请点击「总是允许此站点」'
         }
       : sent;
   });

@@ -31,6 +31,14 @@ export interface WhatsNewInfo {
 }
 
 export const BUILTIN_RELEASE_HIGHLIGHTS: Record<string, { title: string; highlights: string[] }> = {
+  '0.7.2': {
+    title: '彻底解决新装节点首次连通 Muse 出现状态 000 超时的问题',
+    highlights: [
+      '新增 Tailscale Funnel 首次 Let’s Encrypt HTTPS 证书自动预签发与公网自检预热，避免云端首次请求因等证书签发而超时返回 000',
+      '点击「发送协议并触发站点权限预检」时自动检测并唤醒未运行的本地隧道进程，杜绝旧缓存域名假在线',
+      '修复向导页公网隧道在线指示器与真实 Bearer 鉴权握手状态判定'
+    ]
+  },
   '0.7.1': {
     title: '修复 Muse 接管飞书配置时卡在输入框 fill 的问题',
     highlights: [

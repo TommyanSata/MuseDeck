@@ -195,7 +195,13 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
     ? `https://applink.feishu.cn/client/bot/open?appId=${encodeURIComponent(trimmedAppId)}`
     : '';
   const enabledCount = clis.filter((c) => c.config.enabled).length;
-  const isTunnelReady = Boolean(tunnelStatus.state === 'running' || tunnelUrl.trim());
+  const isCustomExternalTunnel = Boolean(
+    tunnelUrl.trim() &&
+      !tunnelUrl.includes('.ts.net') &&
+      !tunnelUrl.includes('serveo') &&
+      !tunnelUrl.includes('trycloudflare.com')
+  );
+  const isTunnelReady = Boolean(tunnelStatus.state === 'running' || isCustomExternalTunnel);
   const isMuseVerified = Boolean(state.muse.tunnelVerified);
 
   const copyText = async (key: string, text: string) => {

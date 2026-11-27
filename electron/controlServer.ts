@@ -476,12 +476,6 @@ export class ControlServer {
       (Boolean(hostHeader) && !hostHeader.startsWith('127.0.0.1') && !hostHeader.startsWith('localhost'));
 
     if (pathname === '/api/v1/health') {
-      if (isRemoteTunnelHit && !this.store.getState().muse.tunnelVerified) {
-        this.store.update((s) => {
-          s.muse.tunnelVerified = true;
-        });
-        this.onStateChanged();
-      }
       this.sendJson(res, 200, {
         ok: true,
         service: 'MuseDeck Local Control API',
@@ -530,8 +524,8 @@ export class ControlServer {
       return;
     }
 
-    // Any authenticated API request from Muse proves tunnel + Bearer token + site permission are 100% working!
-    if (!this.store.getState().muse.tunnelVerified) {
+    // Any remote authenticated API request from Muse proves tunnel + Bearer token + site permission are 100% working!
+    if (isRemoteTunnelHit && !this.store.getState().muse.tunnelVerified) {
       this.store.update((s) => {
         s.muse.tunnelVerified = true;
       });

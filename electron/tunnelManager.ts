@@ -124,6 +124,85 @@ export class TunnelManager {
     });
   }
 
+  /**
+   * Forces eager Let's Encrypt TLS certificate provisioning on tsnet Funnel and verifies
+   * real public HTTPS reachability (using DoH IP resolution so local Clash/TUN Fake-IP never blocks warmup).
+   */
+  async warmupPublicTunnelUrl(publicUrl: string, timeoutMs = 24000): Promise<boolean> {
+    let parsed: URL;
+    try {
+      parsed = new URL(publicUrl);
+      if (parsed.protocol !== 'https:') return true;
+    } catch {
+      return false;
+    }
+
+    const hostname = parsed.hostname;
+    let resolvedIp = '';
+    for (const dohUrl of [
+      `https://cloudflare-dns.com/dns-query?name=${encodeURIComponent(hostname)}&type=A`,
+      `https://dns.google/resolve?name=${encodeURIComponent(hostname)}&type=A`
+    ]) {
+      try {
+        const ctrl = new AbortController();
+        const t = setTimeout(() => ctrl.abort(), 4000);
+        const resp = await fetch(dohUrl, {
+          headers: { accept: 'application/dns-json' },
+          signal: ctrl.signal
+        });
+        clearTimeout(t);
+        if (resp.ok) {
+          const json = (await resp.json()) as { Answer?: Array<{ type?: number; data?: string }> };
+          const aRec = (json.Answer || []).find(
+            (a) => a.type === 1 && a.data && /^\d+\.\d+\.\d+\.\d+$/.test(a.data)
+          );
+          if (aRec?.data) {
+            resolvedIp = aRec.data;
+            break;
+          }
+        }
+      } catch {
+        // try next DoH resolver
+      }
+    }
+
+    const probeOnce = (perAttemptTimeout: number): Promise<boolean> =>
+      new Promise((resolve) => {
+        const req = https.request(
+          {
+            host: resolvedIp || hostname,
+            port: 443,
+            servername: hostname,
+            path: '/api/v1/health',
+            method: 'GET',
+            headers: {
+              Host: hostname,
+              'User-Agent': 'MuseDeck-Tunnel-Warmup/1.0',
+              'X-MuseDeck-Warmup': '1'
+            },
+            timeout: perAttemptTimeout
+          },
+          (res) => {
+            res.resume();
+            resolve(Boolean(res.statusCode && res.statusCode >= 200 && res.statusCode < 500));
+          }
+        );
+        req.on('timeout', () => {
+          req.destroy();
+          resolve(false);
+        });
+        req.on('error', () => {
+          resolve(false);
+        });
+        req.end();
+      });
+
+    const ok1 = await probeOnce(timeoutMs);
+    if (ok1) return true;
+    await new Promise((r) => setTimeout(r, 1200));
+    return probeOnce(14000);
+  }
+
   async startTailscale(): Promise<TunnelStatusPayload> {
     if (this.proc && this.currentStatus.state === 'running' && this.currentStatus.mode === 'tailscale') {
       return this.currentStatus;
@@ -200,22 +279,34 @@ export class TunnelManager {
               message: ev.message || '等待启用 Tailscale Funnel...'
             });
           } else if (ev.event === 'ready' && ev.url) {
+            const readyUrl = ev.url;
             this.store.update((s) => {
-              s.controlApi.tunnelUrl = ev.url!;
+              s.controlApi.tunnelUrl = readyUrl;
               s.controlApi.preferredTunnelMode = 'tailscale';
             });
             this.onStateChanged();
-            const st: TunnelStatusPayload = {
-              state: 'running',
+            this.setStatus({
+              state: 'starting',
               mode: 'tailscale',
-              url: ev.url,
-              message: '内嵌 Tailscale 永久 443 域名已在线（重启不变域名，Muse 只需点一次总是允许）！'
-            };
-            this.setStatus(st);
-            if (!settled) {
-              settled = true;
-              resolve(st);
-            }
+              url: readyUrl,
+              message: '域名已分配，正在自动预签发 HTTPS 安全证书并预热公网通道（首次约需 8~18 秒）...'
+            });
+            void this.warmupPublicTunnelUrl(readyUrl).then((warmOk) => {
+              if (this.currentStatus.state === 'stopped' || !this.proc) return;
+              const st: TunnelStatusPayload = {
+                state: 'running',
+                mode: 'tailscale',
+                url: readyUrl,
+                message: warmOk
+                  ? '✅ 内嵌 Tailscale 永久 443 域名与 HTTPS 证书均已预热就绪（重启不变域名）！'
+                  : '内嵌 Tailscale 域名已启动（若首次握手稍慢，请等几秒再试一次）'
+              };
+              this.setStatus(st);
+              if (!settled) {
+                settled = true;
+                resolve(st);
+              }
+            });
           } else if (ev.event === 'error') {
             const st: TunnelStatusPayload = {
               state: 'error',
