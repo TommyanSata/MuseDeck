@@ -18,6 +18,7 @@ import {
   CliUserConfig,
   DecisionPriorityWeights,
   DetectedCli,
+  FeishuAutoStepReport,
   FeishuStatusEvent,
   FmcState,
   ModelRoutingMode,
@@ -133,6 +134,7 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
   const [botNameDraft, setBotNameDraft] = useState('MuseDeck');
   const [runningFeishuAuto, setRunningFeishuAuto] = useState(false);
   const [feishuAutoTip, setFeishuAutoTip] = useState('');
+  const [feishuStepReport, setFeishuStepReport] = useState<FeishuAutoStepReport[]>([]);
   const [extStatus, setExtStatus] = useState<MuseExtensionStatus | null>(null);
   const [extTip, setExtTip] = useState('');
   const [testingPerm, setTestingPerm] = useState(false);
@@ -204,7 +206,8 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
   const handleRunFeishuAutoPilot = async () => {
     if (runningFeishuAuto) return;
     setRunningFeishuAuto(true);
-    setFeishuAutoTip('正在检查左侧飞书开放平台登录态并启动本地自动代配...');
+    setFeishuStepReport([]);
+    setFeishuAutoTip('正在检查左侧飞书开放平台登录态并启动分步可视自动代配...');
     try {
       const res = await window.fmc.runFeishuAutoPilot({
         botName: botNameDraft,
@@ -212,6 +215,7 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
       });
       if (res.appId) setAppId(res.appId);
       if (res.appSecret) setAppSecret(res.appSecret);
+      if (res.stepReport) setFeishuStepReport(res.stepReport);
       setFeishuAutoTip(res.message);
     } finally {
       setRunningFeishuAuto(false);
@@ -445,7 +449,22 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
                   </div>
                   {feishuAutoTip && (
                     <div className="mt-2 rounded-xl border border-[#eaecef] bg-[#fafafa] px-3 py-2 text-[11px] leading-relaxed text-[#3f3f46]">
-                      {feishuAutoTip}
+                      <div className="font-medium text-[#111827]">{feishuAutoTip}</div>
+                      {feishuStepReport.length > 0 && (
+                        <ul className="mt-2 space-y-1.5 border-t border-[#eaecef] pt-2">
+                          {feishuStepReport.map((item, idx) => (
+                            <li key={idx} className="flex items-start gap-1.5">
+                              <span className="mt-0.5 shrink-0">
+                                {item.status === 'ok' ? '✅' : item.status === 'warn' ? '⚠️' : '👉'}
+                              </span>
+                              <div>
+                                <span className="font-semibold text-[#111827]">{item.step}：</span>
+                                <span className="text-[#52525b]">{item.detail}</span>
+                              </div>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
                     </div>
                   )}
                 </section>

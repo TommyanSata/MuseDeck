@@ -372,7 +372,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
           <Sliders className="h-4 w-4 text-[#52525b]" />
           <h2 className="text-[13.5px] font-semibold text-[#111827]">软件设置</h2>
         </div>
-        <span className="font-mono text-[11px] text-[#8a8f98]">MuseDeck v0.6.0</span>
+        <span className="font-mono text-[11px] text-[#8a8f98]">MuseDeck v0.6.1</span>
       </header>
 
       <div className="flex-1 overflow-y-auto px-6 py-6">

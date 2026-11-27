@@ -419,12 +419,19 @@ export interface MuseExtensionStatus {
   executablePath?: string;
 }
 
+export interface FeishuAutoStepReport {
+  step: string;
+  status: 'ok' | 'warn' | 'manual';
+  detail: string;
+}
+
 export interface FeishuAutoPilotResult {
   ok: boolean;
   needLogin?: boolean;
   appId?: string;
   appSecret?: string;
   completedSteps: string[];
+  stepReport?: FeishuAutoStepReport[];
   nextManualHint?: string;
   message: string;
 }

@@ -14,7 +14,7 @@ import {
   X,
   XCircle
 } from 'lucide-react';
-import { FeishuStatusEvent, FmcState, TunnelStatusEvent } from '../types';
+import { FeishuAutoStepReport, FeishuStatusEvent, FmcState, TunnelStatusEvent } from '../types';
 import { FeishuSetupGuide } from './FeishuSetupGuide';
 
 interface BridgeViewProps {
@@ -34,6 +34,7 @@ export const BridgeView: React.FC<BridgeViewProps> = ({ state, feishuStatus }) =
   const [botNameDraft, setBotNameDraft] = useState('MuseDeck');
   const [autoRunning, setAutoRunning] = useState(false);
   const [autoTip, setAutoTip] = useState('');
+  const [autoStepReport, setAutoStepReport] = useState<FeishuAutoStepReport[]>([]);
 
   useEffect(() => {
     void window.fmc.getTunnelStatus().then((st) => {
@@ -196,7 +197,8 @@ export const BridgeView: React.FC<BridgeViewProps> = ({ state, feishuStatus }) =
                       disabled={autoRunning}
                       onClick={async () => {
                         setAutoRunning(true);
-                        setAutoTip('正在打开本地飞书开放平台助手...');
+                        setAutoStepReport([]);
+                        setAutoTip('正在打开本地飞书开放平台助手并分步可视执行...');
                         try {
                           const r = await window.fmc.runFeishuAutoPilot({
                             botName: botNameDraft,
@@ -204,6 +206,7 @@ export const BridgeView: React.FC<BridgeViewProps> = ({ state, feishuStatus }) =
                           });
                           if (r.appId) setAppId(r.appId);
                           if (r.appSecret) setAppSecret(r.appSecret);
+                          if (r.stepReport) setAutoStepReport(r.stepReport);
                           setAutoTip(r.message);
                         } finally {
                           setAutoRunning(false);
@@ -220,7 +223,24 @@ export const BridgeView: React.FC<BridgeViewProps> = ({ state, feishuStatus }) =
                     </button>
                   </div>
                   {autoTip && (
-                    <p className="mt-1.5 text-[11px] leading-relaxed text-[#3f3f46]">{autoTip}</p>
+                    <div className="mt-1.5 text-[11px] leading-relaxed text-[#3f3f46]">
+                      <div className="font-medium text-[#111827]">{autoTip}</div>
+                      {autoStepReport.length > 0 && (
+                        <ul className="mt-1.5 space-y-1 border-t border-[#eaecef] pt-1.5">
+                          {autoStepReport.map((it, idx) => (
+                            <li key={idx} className="flex items-start gap-1">
+                              <span className="shrink-0">
+                                {it.status === 'ok' ? '✅' : it.status === 'warn' ? '⚠️' : '👉'}
+                              </span>
+                              <span>
+                                <strong>{it.step}：</strong>
+                                {it.detail}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
+                    </div>
                   )}
                 </div>
 

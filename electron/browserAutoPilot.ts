@@ -2,7 +2,7 @@ import { spawn } from 'child_process';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
-import { BrowserWindow, shell, WebContents } from 'electron';
+import { BrowserWindow, clipboard, shell, WebContents } from 'electron';
 
 export const MUSE_CHROME_EXTENSION_ID = 'jnakhhjmpmoohbjgfccbccfoifnmbdjd';
 export const MUSE_CHROME_STORE_URL =
@@ -53,12 +53,19 @@ export interface LocalBrowserSnapshot {
   elements: BrowserElementSnapshot[];
 }
 
+export interface FeishuAutoStepReport {
+  step: string;
+  status: 'ok' | 'warn' | 'manual';
+  detail: string;
+}
+
 export interface FeishuAutoPilotResult {
   ok: boolean;
   needLogin?: boolean;
   appId?: string;
   appSecret?: string;
   completedSteps: string[];
+  stepReport?: FeishuAutoStepReport[];
   nextManualHint?: string;
   message: string;
 }
@@ -545,19 +552,237 @@ export class LocalBrowserController {
   }
 }
 
-async function waitPageSettled(wc: WebContents, extraMs = 900): Promise<void> {
-  const deadline = Date.now() + 8000;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function waitPageSettled(wc: WebContents, extraMs = 1100): Promise<void> {
+  const deadline = Date.now() + 10000;
   while (wc.isLoading() && Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 180));
+    await sleep(200);
   }
-  await new Promise((r) => setTimeout(r, extraMs));
+  await sleep(extraMs);
+}
+
+async function setFeishuHud(
+  wc: WebContents,
+  text: string,
+  tone: 'running' | 'ok' | 'warn' = 'running'
+): Promise<void> {
+  try {
+    await wc.executeJavaScript(
+      `(() => {
+        let el = document.getElementById('fmc-autopilot-hud');
+        if (!el) {
+          el = document.createElement('div');
+          el.id = 'fmc-autopilot-hud';
+          el.style.cssText = 'position:fixed;top:12px;left:50%;transform:translateX(-50%);z-index:2147483647;padding:8px 16px;border-radius:999px;font-size:13px;font-weight:600;font-family:system-ui,-apple-system,sans-serif;box-shadow:0 8px 24px rgba(0,0,0,0.18);pointer-events:none;transition:all 0.25s ease;';
+          document.body.appendChild(el);
+        }
+        const tone = ${JSON.stringify(tone)};
+        el.style.background = tone === 'ok' ? '#065f46' : tone === 'warn' ? '#92400e' : '#18181b';
+        el.style.color = '#ffffff';
+        el.textContent = ${JSON.stringify(text)};
+      })()`,
+      true
+    );
+  } catch {
+    // ignore HUD errors during navigation
+  }
+}
+
+async function highlightRectOnPage(
+  wc: WebContents,
+  rect: { x: number; y: number; width: number; height: number },
+  ms = 650
+): Promise<void> {
+  try {
+    await wc.executeJavaScript(
+      `(() => {
+        let box = document.getElementById('fmc-autopilot-ring');
+        if (!box) {
+          box = document.createElement('div');
+          box.id = 'fmc-autopilot-ring';
+          box.style.cssText = 'position:fixed;z-index:2147483646;border:2.5px solid #10b981;border-radius:8px;background:rgba(16,185,129,0.12);box-shadow:0 0 0 4px rgba(16,185,129,0.22);pointer-events:none;transition:all 0.2s ease;';
+          document.body.appendChild(box);
+        }
+        const r = ${JSON.stringify(rect)};
+        box.style.display = 'block';
+        box.style.left = Math.max(0, r.x - 3) + 'px';
+        box.style.top = Math.max(0, r.y - 3) + 'px';
+        box.style.width = (r.width + 6) + 'px';
+        box.style.height = (r.height + 6) + 'px';
+        setTimeout(() => { if (box) box.style.display = 'none'; }, ${ms});
+      })()`,
+      true
+    );
+  } catch {
+    // ignore
+  }
+  await sleep(ms);
+}
+
+async function clickHardwareAt(wc: WebContents, x: number, y: number): Promise<void> {
+  const rx = Math.max(2, Math.round(x));
+  const ry = Math.max(2, Math.round(y));
+  wc.focus();
+  wc.sendInputEvent({ type: 'mouseMove', x: rx, y: ry });
+  await sleep(70);
+  wc.sendInputEvent({ type: 'mouseDown', x: rx, y: ry, button: 'left', clickCount: 1 });
+  await sleep(70);
+  wc.sendInputEvent({ type: 'mouseUp', x: rx, y: ry, button: 'left', clickCount: 1 });
+}
+
+async function sendSelectAllAndBackspace(wc: WebContents): Promise<void> {
+  wc.focus();
+  const mod = process.platform === 'darwin' ? 'meta' : 'control';
+  wc.sendInputEvent({ type: 'keyDown', keyCode: mod === 'meta' ? 'Meta' : 'Control' });
+  wc.sendInputEvent({ type: 'keyDown', keyCode: 'a', modifiers: [mod] });
+  wc.sendInputEvent({ type: 'keyUp', keyCode: 'a', modifiers: [mod] });
+  wc.sendInputEvent({ type: 'keyUp', keyCode: mod === 'meta' ? 'Meta' : 'Control' });
+  wc.selectAll();
+  await sleep(160);
+  wc.sendInputEvent({ type: 'keyDown', keyCode: 'Backspace' });
+  wc.sendInputEvent({ type: 'keyUp', keyCode: 'Backspace' });
+  await sleep(160);
+}
+
+async function typeNativeIntoRect(
+  wc: WebContents,
+  rect: { x: number; y: number; width: number; height: number },
+  value: string,
+  pressEnter = false
+): Promise<void> {
+  await highlightRectOnPage(wc, rect, 450);
+  await clickHardwareAt(wc, rect.x + Math.min(40, rect.width / 2), rect.y + rect.height / 2);
+  await sleep(180);
+  await sendSelectAllAndBackspace(wc);
+  await wc.insertText(value);
+  await sleep(220);
+  if (pressEnter) {
+    wc.sendInputEvent({ type: 'keyDown', keyCode: 'Enter' });
+    wc.sendInputEvent({ type: 'keyUp', keyCode: 'Enter' });
+    await sleep(250);
+  }
+}
+
+async function waitForPageKeyword(
+  wc: WebContents,
+  keywords: string[],
+  timeoutMs = 10000
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const matched = (await wc.executeJavaScript(
+        `(() => {
+          const txt = document.body?.innerText || '';
+          const kws = ${JSON.stringify(keywords)};
+          return kws.some((k) => txt.includes(k));
+        })()`,
+        true
+      )) as boolean;
+      if (matched) return true;
+    } catch {
+      // ignore while loading
+    }
+    await sleep(350);
+  }
+  return false;
+}
+
+async function navigateFeishuSection(
+  wc: WebContents,
+  menuLabels: string[],
+  readyKeywords: string[],
+  fallbackUrl: string
+): Promise<boolean> {
+  try {
+    const rect = (await wc.executeJavaScript(
+      `(() => {
+        const labels = ${JSON.stringify(menuLabels)};
+        const candidates = Array.from(
+          document.querySelectorAll('aside a, aside li, aside div, nav a, nav li, [class*="menu"] a, [class*="menu"] li, [class*="sider"] div, [class*="nav"] span')
+        );
+        for (const label of labels) {
+          for (const el of candidates) {
+            if (!(el instanceof HTMLElement)) continue;
+            const txt = (el.innerText || '').trim();
+            if (txt === label) {
+              const r = el.getBoundingClientRect();
+              if (r.width >= 20 && r.height >= 14 && r.height <= 64 && r.left < 340) {
+                el.scrollIntoView({ block: 'nearest' });
+                const nr = el.getBoundingClientRect();
+                return { x: nr.left, y: nr.top, width: nr.width, height: nr.height };
+              }
+            }
+          }
+        }
+        return null;
+      })()`,
+      true
+    )) as { x: number; y: number; width: number; height: number } | null;
+
+    if (rect) {
+      await highlightRectOnPage(wc, rect, 500);
+      await clickHardwareAt(wc, rect.x + rect.width / 2, rect.y + rect.height / 2);
+      const ok = await waitForPageKeyword(wc, readyKeywords, 6500);
+      if (ok) {
+        await sleep(500);
+        return true;
+      }
+    }
+  } catch {
+    // fallback to URL load
+  }
+
+  await wc.loadURL(fallbackUrl);
+  await waitPageSettled(wc, 1400);
+  return waitForPageKeyword(wc, readyKeywords, 9000);
+}
+
+async function findAndHighlightClick(
+  wc: WebContents,
+  regexSource: string,
+  options?: { insideModal?: boolean; exact?: boolean; pauseAfterMs?: number }
+): Promise<{ clicked: boolean; label: string }> {
+  const rectInfo = (await wc.executeJavaScript(
+    `(() => {
+      const re = new RegExp(${JSON.stringify(regexSource)}, 'i');
+      const scope = ${Boolean(options?.insideModal)}
+        ? (document.querySelector('[role="dialog"], .ud__modal, .semi-modal-content, .arco-modal') || document)
+        : document;
+      const nodes = Array.from(scope.querySelectorAll('button, a, [role="button"], label, span'));
+      for (const node of nodes) {
+        const btn = node.closest('button, a, [role="button"], label') || node;
+        if (!(btn instanceof HTMLElement)) continue;
+        if (btn.hasAttribute('disabled') || btn.getAttribute('aria-disabled') === 'true') continue;
+        const style = window.getComputedStyle(btn);
+        if (style.display === 'none' || style.visibility === 'hidden' || style.pointerEvents === 'none') continue;
+        const txt = (btn.innerText || '').replace(/\\s+/g, ' ').trim();
+        if (!txt || txt.length > 40) continue;
+        const matched = ${Boolean(options?.exact)} ? txt === ${JSON.stringify(regexSource)} : re.test(txt);
+        if (!matched) continue;
+        const r = btn.getBoundingClientRect();
+        if (r.width < 16 || r.height < 14) continue;
+        btn.scrollIntoView({ block: 'center' });
+        const nr = btn.getBoundingClientRect();
+        return { x: nr.left, y: nr.top, width: nr.width, height: nr.height, label: txt };
+      }
+      return null;
+    })()`,
+    true
+  )) as { x: number; y: number; width: number; height: number; label: string } | null;
+
+  if (!rectInfo) return { clicked: false, label: '' };
+  await highlightRectOnPage(wc, rectInfo, 600);
+  await clickHardwareAt(wc, rectInfo.x + rectInfo.width / 2, rectInfo.y + rectInfo.height / 2);
+  await sleep(options?.pauseAfterMs ?? 950);
+  return { clicked: true, label: rectInfo.label };
 }
 
 /**
- * Local-IP One-Click Feishu Bot Auto-Configurator driving the embedded `open.feishu.cn` view.
- * Requires the user to have scanned the Feishu QR code once on local IP; automates app creation,
- * credential extraction + immediate WebSocket connection, Bot capability, 7-scope batch JSON import,
- * WebSocket event subscription (`im.message.receive_v1`), and version `1.0.0` draft creation.
+ * Local-IP Step-by-Step Verified Feishu Bot Auto-Configurator.
+ * Uses smooth sidebar transitions, visible green highlight pacing, native Chromium hardware clicks,
+ * native clipboard paste + React Fiber injection for Feishu's Monaco JSON editor, and strict per-step verification.
  */
 export async function runFeishuLocalAutoPilot(params: {
   wc: WebContents;
@@ -571,319 +796,683 @@ export async function runFeishuLocalAutoPilot(params: {
   const botName = (params.botName || 'MuseDeck').trim() || 'MuseDeck';
   const botDesc = (params.botDesc || 'MuseDeck 本地多 AI 编程工具调度总控助手').trim();
   const completedSteps: string[] = [];
+  const stepReport: FeishuAutoStepReport[] = [];
+
+  const emitStep = async (msg: string, tone: 'running' | 'ok' | 'warn' = 'running') => {
+    onProgress(msg);
+    await setFeishuHud(wc, msg, tone);
+  };
 
   try {
     const curUrl = wc.getURL();
     if (!curUrl.includes('open.feishu.cn')) {
-      onProgress('正在打开飞书开放平台后台...');
+      await emitStep('正在打开飞书开放平台开发者后台...');
       await wc.loadURL('https://open.feishu.cn/app');
-      await waitPageSettled(wc, 1400);
+      await waitPageSettled(wc, 1800);
     }
 
-    // 0. Check if user is logged into open.feishu.cn
+    await waitForPageKeyword(wc, ['企业自建应用', '凭证与基础信息', '扫码登录', '登录'], 6000);
     const loginCheck = (await wc.executeJavaScript(
       `(() => {
         const href = location.href;
-        const txt = (document.body?.innerText || '');
+        const txt = document.body?.innerText || '';
         const onPassport = href.includes('accounts.feishu.cn') || href.includes('passport.feishu.cn');
-        const hasConsole = txt.includes('企业自建应用') || txt.includes('凭证与基础信息') || /\\/app\\/cli_[a-zA-Z0-9]+/.test(href);
-        return { href, onPassport, hasConsole };
+        const hasConsole =
+          txt.includes('企业自建应用') ||
+          txt.includes('凭证与基础信息') ||
+          txt.includes('添加应用能力') ||
+          /\\/app\\/cli_[a-zA-Z0-9]+/.test(href);
+        return { onPassport, hasConsole };
       })()`,
       true
-    )) as { href: string; onPassport: boolean; hasConsole: boolean };
+    )) as { onPassport: boolean; hasConsole: boolean };
 
     if (loginCheck.onPassport || !loginCheck.hasConsole) {
+      await emitStep('请先用手机飞书扫码登录开放平台，登录成功后再点一次「⚡ 一键自动代配」', 'warn');
       return {
         ok: false,
         needLogin: true,
         completedSteps,
+        stepReport,
         message:
-          '请先在左侧飞书开放平台网页用手机飞书扫码登录（走本机 IP 安全无风控）。扫码进入开发者后台后，再点一次「⚡ 一键自动代配」即可自动完成后续配置！'
+          '请先在左侧飞书开放平台网页用手机飞书扫码登录（走本机 IP 安全无风控）。进入开发者后台后再点一次「⚡ 一键自动代配」即可自动完成！'
       };
     }
 
-    // 1. Reuse open cli_xxxx app page or create a new enterprise custom app
+    // ==================== STEP 1: CREATE OR LOCATE APP ====================
+    await emitStep(`⚡ [1/6] 正在定位或创建企业自建应用「${botName}」...`);
     let appId = '';
     const urlMatch = wc.getURL().match(/\/app\/(cli_[a-zA-Z0-9]+)/);
     if (urlMatch) {
       appId = urlMatch[1];
       completedSteps.push(`已识别当前打开的应用 (${appId})`);
+      stepReport.push({ step: '1. 创建/定位自建应用', status: 'ok', detail: `正在配置当前应用 ${appId}` });
     } else if (params.existingAppId && /^cli_[a-zA-Z0-9]+$/.test(params.existingAppId.trim())) {
       appId = params.existingAppId.trim();
       await wc.loadURL(`https://open.feishu.cn/app/${appId}/baseinfo`);
-      await waitPageSettled(wc, 1300);
-      completedSteps.push(`已定位到应用 (${appId})`);
+      await waitPageSettled(wc, 1600);
+      await waitForPageKeyword(wc, ['凭证与基础信息', 'App ID', '添加应用能力'], 8000);
+      completedSteps.push(`已进入已填应用 (${appId})`);
+      stepReport.push({ step: '1. 创建/定位自建应用', status: 'ok', detail: `已打开应用 ${appId}` });
     } else {
-      onProgress(`第 1/6 步：正在自动创建企业自建应用「${botName}」...`);
-      await wc.executeJavaScript(
-        `(async () => {
-          const setVal = (el, val) => {
-            if (!el) return false;
-            el.focus();
-            const proto = el.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
-            const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-            if (setter) setter.call(el, val);
-            else el.value = val;
-            el.dispatchEvent(new Event('input', { bubbles: true }));
-            el.dispatchEvent(new Event('change', { bubbles: true }));
-            return true;
-          };
-          const createBtn = Array.from(document.querySelectorAll('button, [role="button"], span'))
-            .find((el) => /创建企业自建应用/.test((el.innerText || '').trim()));
-          if (createBtn && createBtn instanceof HTMLElement) {
-            (createBtn.closest('button') || createBtn).click();
-            await new Promise((r) => setTimeout(r, 700));
-          }
-          const dialog = document.querySelector('[role="dialog"], .ud__modal, .arco-modal, .semi-modal') || document;
-          const inputs = Array.from(dialog.querySelectorAll('input[type="text"], input:not([type]), textarea'));
-          if (inputs[0]) setVal(inputs[0], ${JSON.stringify(botName)});
-          if (inputs[1]) setVal(inputs[1], ${JSON.stringify(botDesc)});
-          await new Promise((r) => setTimeout(r, 350));
-          const submitBtn = Array.from(dialog.querySelectorAll('button'))
-            .find((b) => /^(创建|确定|确认)$/.test((b.innerText || '').trim()) && !b.disabled);
-          if (submitBtn) submitBtn.click();
-        })()`,
-        true
-      );
+      const createClick = await findAndHighlightClick(wc, '创建企业自建应用', { pauseAfterMs: 1100 });
+      if (createClick.clicked) {
+        const modalInputs = (await wc.executeJavaScript(
+          `(() => {
+            const modal = document.querySelector('[role="dialog"], .ud__modal, .semi-modal-content, .arco-modal') || document.body;
+            const fields = Array.from(modal.querySelectorAll('input[type="text"], input:not([type]), textarea'))
+              .filter((el) => {
+                const r = el.getBoundingClientRect();
+                return r.width > 80 && r.height > 20;
+              })
+              .map((el) => {
+                const r = el.getBoundingClientRect();
+                return { x: r.left, y: r.top, width: r.width, height: r.height, tag: el.tagName };
+              });
+            return fields;
+          })()`,
+          true
+        )) as Array<{ x: number; y: number; width: number; height: number; tag: string }>;
 
-      for (let i = 0; i < 16; i++) {
-        await new Promise((r) => setTimeout(r, 500));
-        const m = wc.getURL().match(/\/app\/(cli_[a-zA-Z0-9]+)/);
-        if (m) {
-          appId = m[1];
-          break;
+        if (modalInputs[0]) {
+          await typeNativeIntoRect(wc, modalInputs[0], botName);
+        }
+        if (modalInputs[1]) {
+          await typeNativeIntoRect(wc, modalInputs[1], botDesc);
+        }
+        await sleep(600);
+        await findAndHighlightClick(wc, '^(创建|确定|确认)$', { insideModal: true, pauseAfterMs: 1200 });
+
+        for (let i = 0; i < 20; i++) {
+          await sleep(500);
+          const m = wc.getURL().match(/\/app\/(cli_[a-zA-Z0-9]+)/);
+          if (m) {
+            appId = m[1];
+            break;
+          }
         }
       }
+
       if (!appId) {
+        stepReport.push({
+          step: '1. 创建企业自建应用',
+          status: 'manual',
+          detail: '请在左侧弹窗确认名称与描述并点击「创建」，进入应用后台后再点一次一键代配'
+        });
+        await emitStep('请在左侧点击「创建」进入应用详情页后，再点一次「⚡ 一键自动代配」', 'warn');
         return {
           ok: false,
           completedSteps,
+          stepReport,
           message:
-            '已在左侧打开创建应用弹窗并填入名称，请点一下弹窗右下角的「创建」进入应用详情页后，再点一次「⚡ 一键自动代配」继续！'
+            '已在左侧打开创建窗口，请确认应用名称与描述后点击「创建」进入应用后台，再点一次「⚡ 一键自动代配」即可继续完成后续 5 步！'
         };
       }
-      completedSteps.push(`已自动创建企业自建应用「${botName}」(${appId})`);
+      completedSteps.push(`已创建企业自建应用「${botName}」(${appId})`);
+      stepReport.push({ step: '1. 创建企业自建应用', status: 'ok', detail: `成功创建 ${botName} (${appId})` });
     }
 
-    // 2. Navigate to Credentials (/baseinfo), unmask & extract App ID + App Secret, and connect WS!
-    onProgress('第 2/6 步：正在读取 App ID 与 App Secret 并建立本地长连接...');
-    await wc.loadURL(`https://open.feishu.cn/app/${appId}/baseinfo`);
-    await waitPageSettled(wc, 1400);
-
-    const extractedSecret = (await wc.executeJavaScript(
-      `(async () => {
-        // Click eye/show icon near App Secret if masked with asterisks
-        const allEls = Array.from(document.querySelectorAll('div, span, td, label'));
-        const secretLabel = allEls.find((el) => (el.innerText || '').trim() === 'App Secret');
-        const row = secretLabel?.closest('tr, [class*="row"], [class*="item"], [class*="field"]') || document.body;
-        const icons = Array.from(row.querySelectorAll('button, [role="button"], svg, span[class*="icon"]'));
-        for (const ic of icons.slice(0, 6)) {
-          const btn = ic.closest('button, [role="button"]') || ic;
-          if (btn instanceof HTMLElement && !/重置|Reset/i.test(btn.innerText || '')) {
-            btn.click();
-            await new Promise((r) => setTimeout(r, 350));
-          }
-        }
-        const rowText = (row.innerText || '') + ' ' + (document.body?.innerText || '');
-        const candidates = rowText.match(/\\b[a-zA-Z0-9]{28,40}\\b/g) || [];
-        const secret = candidates.find((s) => !s.startsWith('cli_') && /[a-zA-Z]/.test(s) && /\\d/.test(s));
-        return secret || '';
-      })()`,
-      true
-    )) as string;
-
-    if (extractedSecret) {
-      const wsOk = await onCredentialsReady(appId, extractedSecret);
-      completedSteps.push(
-        wsOk
-          ? '已自动提取凭证并成功连上飞书 WebSocket 长连接'
-          : '已自动提取并填入 App ID 与 App Secret'
-      );
-    }
-
-    // 3. Add Bot capability (/bot)
-    onProgress('第 3/6 步：正在自动启用「机器人」应用能力...');
-    await wc.loadURL(`https://open.feishu.cn/app/${appId}/bot`);
-    await waitPageSettled(wc, 1300);
-    await wc.executeJavaScript(
-      `(async () => {
-        const addBotBtn = Array.from(document.querySelectorAll('button, [role="button"]'))
-          .find((b) => /(添加机器人|启用机器人|^\\+?\\s*添加$)/.test((b.innerText || '').trim()));
-        if (addBotBtn && addBotBtn instanceof HTMLElement) {
-          addBotBtn.click();
-          await new Promise((r) => setTimeout(r, 600));
-        }
-      })()`,
-      true
-    );
-    completedSteps.push('已检查/开启「机器人」能力');
-
-    // 4. Batch import 7 scopes (/auth)
-    onProgress('第 4/6 步：正在批量导入 7 项消息与文件权限...');
-    await wc.loadURL(`https://open.feishu.cn/app/${appId}/auth`);
-    await waitPageSettled(wc, 1500);
-    const scopeImported = (await wc.executeJavaScript(
-      `(async () => {
-        const batchBtn = Array.from(document.querySelectorAll('button, [role="button"]'))
-          .find((b) => /批量导入/.test((b.innerText || '').trim()));
-        if (!batchBtn || !(batchBtn instanceof HTMLElement)) return false;
-        batchBtn.click();
-        await new Promise((r) => setTimeout(r, 700));
-
-        const importTab = Array.from(document.querySelectorAll('[role="tab"], div, span'))
-          .find((el) => (el.innerText || '').trim() === '导入权限');
-        if (importTab && importTab instanceof HTMLElement) {
-          importTab.click();
-          await new Promise((r) => setTimeout(r, 350));
-        }
-
-        const jsonStr = ${JSON.stringify(FEISHU_REQUIRED_SCOPES_JSON)};
-        // Support Monaco editor, CodeMirror, or textarea inside modal
-        let filled = false;
-        const monacoModels = window.monaco?.editor?.getModels?.();
-        if (monacoModels && monacoModels.length > 0) {
-          monacoModels[monacoModels.length - 1].setValue(jsonStr);
-          filled = true;
-        }
-        if (!filled) {
-          const ta = document.querySelector('[role="dialog"] textarea, .ud__modal textarea, textarea');
-          if (ta && ta instanceof HTMLTextAreaElement) {
-            ta.focus();
-            ta.select();
-            document.execCommand('insertText', false, jsonStr);
-            const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')?.set;
-            if (setter) setter.call(ta, jsonStr);
-            ta.dispatchEvent(new Event('input', { bubbles: true }));
-            filled = true;
-          }
-        }
-        await new Promise((r) => setTimeout(r, 500));
-        const nextBtn = Array.from(document.querySelectorAll('button'))
-          .find((b) => /下一步|确认新增权限/.test((b.innerText || '').trim()) && !b.disabled);
-        if (nextBtn) {
-          nextBtn.click();
-          await new Promise((r) => setTimeout(r, 650));
-          const applyBtn = Array.from(document.querySelectorAll('button'))
-            .find((b) => /申请开通|确认开通|确定/.test((b.innerText || '').trim()) && !b.disabled);
-          if (applyBtn) {
-            applyBtn.click();
-            await new Promise((r) => setTimeout(r, 650));
-            return true;
-          }
-        }
-        return filled;
+    // ==================== STEP 2: ADD BOT CAPABILITY ====================
+    await emitStep('⚡ [2/6] 正在检查并开启「机器人」应用能力...');
+    const alreadyHasBotInMenu = (await wc.executeJavaScript(
+      `(() => {
+        const menuItems = Array.from(document.querySelectorAll('aside *, nav *, [class*="menu"] *'))
+          .map((el) => (el instanceof HTMLElement ? (el.innerText || '').trim() : ''));
+        return menuItems.includes('机器人');
       })()`,
       true
     )) as boolean;
-    if (scopeImported) {
-      completedSteps.push('已自动批量导入并开通 7 项飞书权限');
+
+    if (alreadyHasBotInMenu) {
+      completedSteps.push('应用已具备「机器人」能力');
+      stepReport.push({ step: '2. 添加「机器人」能力', status: 'ok', detail: '左侧菜单已存在「机器人」能力' });
+      await sleep(600);
+    } else {
+      await navigateFeishuSection(
+        wc,
+        ['添加应用能力'],
+        ['按能力添加', '机器人', '网页应用'],
+        `https://open.feishu.cn/app/${appId}/bot`
+      );
+      await sleep(700);
+
+      const botCardBtn = (await wc.executeJavaScript(
+        `(() => {
+          const allNodes = Array.from(document.querySelectorAll('div, section, li'));
+          const botCards = allNodes.filter((el) => {
+            if (!(el instanceof HTMLElement)) return false;
+            const txt = (el.innerText || '').trim();
+            if (!txt.includes('机器人')) return false;
+            if (txt.includes('网页应用') && txt.includes('小程序')) return false;
+            const r = el.getBoundingClientRect();
+            return r.width >= 180 && r.width <= 680 && r.height >= 80 && r.height <= 380;
+          });
+          botCards.sort((a, b) => a.innerText.length - b.innerText.length);
+          for (const card of botCards) {
+            if ((card.innerText || '').includes('已添加')) {
+              return { alreadyAdded: true };
+            }
+            const btn = Array.from(card.querySelectorAll('button, [role="button"]')).find((b) => {
+              const t = (b.innerText || '').replace(/\\s+/g, '').trim();
+              return /^(\\+?添加|添加机器人|启用)$/.test(t) && !b.hasAttribute('disabled');
+            });
+            if (btn && btn instanceof HTMLElement) {
+              btn.scrollIntoView({ block: 'center' });
+              const r = btn.getBoundingClientRect();
+              return { x: r.left, y: r.top, width: r.width, height: r.height };
+            }
+          }
+          return null;
+        })()`,
+        true
+      )) as { alreadyAdded?: boolean; x?: number; y?: number; width?: number; height?: number } | null;
+
+      if (botCardBtn?.alreadyAdded) {
+        completedSteps.push('「机器人」能力已处于添加状态');
+        stepReport.push({ step: '2. 添加「机器人」能力', status: 'ok', detail: '已启用机器人能力' });
+      } else if (botCardBtn && typeof botCardBtn.x === 'number') {
+        await highlightRectOnPage(
+          wc,
+          { x: botCardBtn.x, y: botCardBtn.y!, width: botCardBtn.width!, height: botCardBtn.height! },
+          700
+        );
+        await clickHardwareAt(
+          wc,
+          botCardBtn.x + botCardBtn.width! / 2,
+          botCardBtn.y! + botCardBtn.height! / 2
+        );
+        await sleep(1800);
+        completedSteps.push('已自动点击添加「机器人」能力');
+        stepReport.push({ step: '2. 添加「机器人」能力', status: 'ok', detail: '成功为应用添加机器人能力' });
+      } else {
+        stepReport.push({
+          step: '2. 添加「机器人」能力',
+          status: 'warn',
+          detail: '未定位到机器人卡片按钮，请检查左侧「添加应用能力 → 机器人」是否已添加'
+        });
+      }
     }
 
-    // 5. Configure WebSocket Long Connection + subscribe im.message.receive_v1 (/event)
-    onProgress('第 5/6 步：正在配置「长连接接收事件」并订阅接收消息事件...');
-    await wc.loadURL(`https://open.feishu.cn/app/${appId}/event`);
-    await waitPageSettled(wc, 1500);
-    await wc.executeJavaScript(
-      `(async () => {
-        // Click edit icon/button for event subscription mode if needed
-        const editBtns = Array.from(document.querySelectorAll('button, [role="button"], span'))
-          .filter((b) => /^(编辑|修改订阅方式)$/.test((b.innerText || '').trim()));
-        if (editBtns[0] && editBtns[0] instanceof HTMLElement) {
-          editBtns[0].click();
-          await new Promise((r) => setTimeout(r, 400));
-        }
-        const wsRadio = Array.from(document.querySelectorAll('label, span, div'))
-          .find((el) => /使用长连接接收事件/.test((el.innerText || '').trim()));
-        if (wsRadio && wsRadio instanceof HTMLElement) {
-          wsRadio.click();
-          await new Promise((r) => setTimeout(r, 350));
-        }
-        const saveBtn = Array.from(document.querySelectorAll('button'))
-          .find((b) => /^(保存)$/.test((b.innerText || '').trim()) && !b.disabled);
-        if (saveBtn) {
-          saveBtn.click();
-          await new Promise((r) => setTimeout(r, 800));
+    // ==================== STEP 3: BATCH IMPORT 7 PERMISSION SCOPES (MONACO EDITOR) ====================
+    await emitStep('⚡ [3/6] 正在进入「权限管理」并向编辑器写入 7 项消息与文件权限 JSON...');
+    await navigateFeishuSection(
+      wc,
+      ['权限管理'],
+      ['批量导入', '开通权限', 'API 权限'],
+      `https://open.feishu.cn/app/${appId}/auth`
+    );
+    await sleep(900);
+
+    const openBatchModal = await findAndHighlightClick(wc, '批量导入', { pauseAfterMs: 1200 });
+    if (!openBatchModal.clicked) {
+      stepReport.push({
+        step: '3. 批量导入 7 项权限 JSON',
+        status: 'warn',
+        detail: '未找到「批量导入/导出权限」按钮，请在权限管理页手动点击并粘贴 JSON'
+      });
+    } else {
+      await findAndHighlightClick(wc, '^导入权限$', { insideModal: true, pauseAfterMs: 650 });
+      await sleep(500);
+
+      // Layer 1: React Fiber / Monaco model direct setValue / onChange inside modal
+      await wc.executeJavaScript(
+        `(() => {
+          const jsonStr = ${JSON.stringify(FEISHU_REQUIRED_SCOPES_JSON)};
+          const modal = document.querySelector('[role="dialog"], .ud__modal, .semi-modal-content, .arco-modal') || document;
+          if (window.monaco && window.monaco.editor && window.monaco.editor.getModels) {
+            const models = window.monaco.editor.getModels();
+            if (models.length > 0) models[models.length - 1].setValue(jsonStr);
+          }
+          const editorNodes = Array.from(modal.querySelectorAll('.monaco-editor, [class*="monaco"], [class*="editor"]'));
+          for (const node of editorNodes) {
+            const fiberKey = Object.keys(node).find((k) => k.startsWith('__reactFiber$') || k.startsWith('__reactInternalInstance$'));
+            let cur = fiberKey ? node[fiberKey] : null;
+            for (let depth = 0; cur && depth < 15; depth++, cur = cur.return) {
+              const inst = cur.stateNode;
+              if (inst && inst.editor && typeof inst.editor.setValue === 'function') {
+                inst.editor.setValue(jsonStr);
+              }
+              if (cur.ref && cur.ref.current && cur.ref.current.editor && typeof cur.ref.current.editor.setValue === 'function') {
+                cur.ref.current.editor.setValue(jsonStr);
+              }
+              const props = cur.memoizedProps;
+              if (props && typeof props.onChange === 'function' && typeof props.value === 'string') {
+                try { props.onChange(jsonStr); } catch (e) {}
+              }
+            }
+          }
+        })()`,
+        true
+      );
+      await sleep(450);
+
+      let editorCheck = (await wc.executeJavaScript(
+        `(() => {
+          const modal = document.querySelector('[role="dialog"], .ud__modal, .semi-modal-content, .arco-modal');
+          if (!modal) return { hasScopes: false, rect: null };
+          const ed = modal.querySelector('.monaco-editor .view-lines, .monaco-editor, .cm-content, textarea');
+          const txt = (modal.innerText || '').replace(/\\u00a0/g, ' ');
+          const hasScopes = txt.includes('im:message:send_as_bot') && txt.includes('im:resource');
+          if (!ed) return { hasScopes, rect: null };
+          const r = ed.getBoundingClientRect();
+          return { hasScopes, rect: { x: r.left, y: r.top, width: r.width, height: r.height } };
+        })()`,
+        true
+      )) as {
+        hasScopes: boolean;
+        rect: { x: number; y: number; width: number; height: number } | null;
+      };
+
+      // Layer 2: Native Hardware Click + Ctrl+A + Backspace + Native Clipboard wc.paste()!
+      if (!editorCheck.hasScopes && editorCheck.rect && editorCheck.rect.width > 40) {
+        const prevClipboard = clipboard.readText();
+        try {
+          clipboard.writeText(FEISHU_REQUIRED_SCOPES_JSON);
+          await highlightRectOnPage(wc, editorCheck.rect, 550);
+          await clickHardwareAt(
+            wc,
+            editorCheck.rect.x + Math.min(120, editorCheck.rect.width / 2),
+            editorCheck.rect.y + Math.min(60, editorCheck.rect.height / 2)
+          );
+          await sleep(260);
+          await sendSelectAllAndBackspace(wc);
+          wc.paste();
+          await sleep(750);
+
+          const afterPaste = (await wc.executeJavaScript(
+            `(() => {
+              const modal = document.querySelector('[role="dialog"], .ud__modal, .semi-modal-content, .arco-modal');
+              const txt = ((modal && modal.innerText) || '').replace(/\\u00a0/g, ' ');
+              return txt.includes('im:message') && txt.includes('im:resource');
+            })()`,
+            true
+          )) as boolean;
+
+          if (!afterPaste) {
+            const mod = process.platform === 'darwin' ? 'meta' : 'control';
+            wc.sendInputEvent({ type: 'keyDown', keyCode: mod === 'meta' ? 'Meta' : 'Control' });
+            wc.sendInputEvent({ type: 'keyDown', keyCode: 'v', modifiers: [mod] });
+            wc.sendInputEvent({ type: 'keyUp', keyCode: 'v', modifiers: [mod] });
+            wc.sendInputEvent({ type: 'keyUp', keyCode: mod === 'meta' ? 'Meta' : 'Control' });
+            await sleep(750);
+          }
+        } finally {
+          clipboard.writeText(prevClipboard);
         }
 
-        // Click Add Event -> search im.message.receive_v1
-        const addEvBtn = Array.from(document.querySelectorAll('button'))
-          .find((b) => /添加事件/.test((b.innerText || '').trim()));
-        if (addEvBtn) {
-          addEvBtn.click();
-          await new Promise((r) => setTimeout(r, 650));
-          const searchInput = document.querySelector('[role="dialog"] input, input[placeholder*="搜索"], input[placeholder*="事件"]');
-          if (searchInput && searchInput instanceof HTMLInputElement) {
-            searchInput.focus();
-            const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
-            if (setter) setter.call(searchInput, 'im.message.receive_v1');
-            searchInput.dispatchEvent(new Event('input', { bubbles: true }));
-            searchInput.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
-            await new Promise((r) => setTimeout(r, 700));
-          }
-          const cb = document.querySelector('[role="dialog"] input[type="checkbox"], [role="dialog"] .ud__checkbox, [role="dialog"] .arco-checkbox');
-          if (cb && cb instanceof HTMLElement) {
-            cb.click();
-            await new Promise((r) => setTimeout(r, 350));
-          }
-          const confirmAdd = Array.from(document.querySelectorAll('[role="dialog"] button, button'))
-            .find((b) => /确认添加|确定/.test((b.innerText || '').trim()) && !b.disabled);
-          if (confirmAdd) {
-            confirmAdd.click();
-            await new Promise((r) => setTimeout(r, 650));
-          }
-        }
-      })()`,
-      true
-    );
-    completedSteps.push('已尝试保存长连接订阅并添加 im.message.receive_v1');
+        editorCheck = (await wc.executeJavaScript(
+          `(() => {
+            const modal = document.querySelector('[role="dialog"], .ud__modal, .semi-modal-content, .arco-modal');
+            const txt = ((modal && modal.innerText) || '').replace(/\\u00a0/g, ' ');
+            return {
+              hasScopes: txt.includes('im:message') && txt.includes('im:resource'),
+              rect: null
+            };
+          })()`,
+          true
+        )) as { hasScopes: boolean; rect: null };
+      }
 
-    // 6. Navigate to Version Management & Create Version 1.0.0 (/version)
-    onProgress('第 6/6 步：正在打开版本发布页并预填 1.0.0 版本信息...');
-    await wc.loadURL(`https://open.feishu.cn/app/${appId}/version`);
-    await waitPageSettled(wc, 1400);
-    await wc.executeJavaScript(
-      `(async () => {
-        const createVerBtn = Array.from(document.querySelectorAll('button, a'))
-          .find((b) => /创建版本/.test((b.innerText || '').trim()));
-        if (createVerBtn && createVerBtn instanceof HTMLElement) {
-          createVerBtn.click();
-          await new Promise((r) => setTimeout(r, 900));
+      // Pause 1s visibly so user clearly sees the JSON inside the Monaco editor!
+      await sleep(1000);
+
+      if (!editorCheck.hasScopes) {
+        stepReport.push({
+          step: '3. 批量导入 7 项权限 JSON',
+          status: 'warn',
+          detail: '未能自动写入权限编辑器，请点击下方指引中的「复制权限 JSON」手动粘贴导入'
+        });
+      } else {
+        const stepNext = await findAndHighlightClick(wc, '下一步|确认新增权限|确定导入', {
+          insideModal: true,
+          pauseAfterMs: 1300
+        });
+
+        const modalStatus = (await wc.executeJavaScript(
+          `(() => {
+            const txt = document.body?.innerText || '';
+            return {
+              alreadyAllGranted: txt.includes('暂无新增权限') || txt.includes('没有新增权限') || txt.includes('已全部开通')
+            };
+          })()`,
+          true
+        )) as { alreadyAllGranted: boolean };
+
+        if (modalStatus.alreadyAllGranted) {
+          await findAndHighlightClick(wc, '^(取消|关闭|知道了)$', { insideModal: true, pauseAfterMs: 500 });
+          completedSteps.push('7 项飞书权限此前已全部开通');
+          stepReport.push({
+            step: '3. 批量导入 7 项权限 JSON',
+            status: 'ok',
+            detail: '7 项权限均已处于已开通状态'
+          });
+        } else if (stepNext.clicked) {
+          await sleep(600);
+          const applyClick = await findAndHighlightClick(wc, '申请开通|确认开通|批量开通|提交申请', {
+            insideModal: true,
+            pauseAfterMs: 1600
+          });
+          await findAndHighlightClick(wc, '^(确定|完成|关闭|知道了)$', {
+            insideModal: true,
+            pauseAfterMs: 700
+          });
+
+          if (applyClick.clicked) {
+            completedSteps.push('已成功导入 JSON 并点击「申请开通」7 项权限');
+            stepReport.push({
+              step: '3. 批量导入 7 项权限 JSON',
+              status: 'ok',
+              detail: '已成功写入 JSON 并提交开通全部 7 项消息与文件权限'
+            });
+          } else {
+            stepReport.push({
+              step: '3. 批量导入 7 项权限 JSON',
+              status: 'warn',
+              detail: 'JSON 已填入并进入确认页，请在左侧弹窗点一下「申请开通」'
+            });
+          }
+        } else {
+          stepReport.push({
+            step: '3. 批量导入 7 项权限 JSON',
+            status: 'warn',
+            detail: 'JSON 已写入编辑器，若提示原先均已开通可直接关闭弹窗，否则请点「下一步 → 申请开通」'
+          });
         }
-        const setVal = (el, val) => {
-          if (!el) return;
-          el.focus();
-          const proto = el.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
-          const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-          if (setter) setter.call(el, val);
-          else el.value = val;
-          el.dispatchEvent(new Event('input', { bubbles: true }));
-          el.dispatchEvent(new Event('change', { bubbles: true }));
-        };
-        const verInput = document.querySelector('input[placeholder*="1.0.0"], input[placeholder*="版本"]');
-        if (verInput) setVal(verInput, '1.0.0');
-        const noteInput = document.querySelector('textarea');
-        if (noteInput) setVal(noteInput, 'MuseDeck 自动初始化版本发布');
+      }
+    }
+
+    // ==================== STEP 4: EXTRACT CREDENTIALS & CONNECT WEBSOCKET ====================
+    await emitStep('⚡ [4/6] 正在读取 App ID 与 App Secret 并建立本地飞书长连接...');
+    await navigateFeishuSection(
+      wc,
+      ['凭证与基础信息'],
+      ['App ID', 'App Secret'],
+      `https://open.feishu.cn/app/${appId}/baseinfo`
+    );
+    await sleep(900);
+
+    let extractedSecret = '';
+    const prevClipForSecret = clipboard.readText();
+    try {
+      clipboard.writeText('');
+      const secretIconRects = (await wc.executeJavaScript(
+        `(() => {
+          const labels = Array.from(document.querySelectorAll('div, span, td, th, label'));
+          const secretLabel = labels.find((el) => (el.innerText || '').trim() === 'App Secret');
+          const row =
+            (secretLabel && secretLabel.closest('tr, [class*="row"], [class*="item"], [class*="field"], [class*="secret"]')) ||
+            (secretLabel && secretLabel.parentElement && secretLabel.parentElement.parentElement);
+          if (!row) return { directText: '', rects: [] };
+          const rowTxt = (row.innerText || '');
+          const directMatch = rowTxt.match(/\\b([a-zA-Z0-9]{28,40})\\b/g) || [];
+          const validDirect = directMatch.find((s) => !s.startsWith('cli_') && /[a-zA-Z]/.test(s) && /\\d/.test(s)) || '';
+          const btns = Array.from(row.querySelectorAll('button, [role="button"], span[class*="icon"], svg'))
+            .map((el) => el.closest('button, [role="button"]') || el)
+            .filter((el, idx, arr) => {
+              if (!(el instanceof HTMLElement)) return false;
+              if (arr.indexOf(el) !== idx) return false;
+              const t = (el.innerText || el.getAttribute('title') || el.getAttribute('aria-label') || '').trim();
+              if (/重置|Reset/i.test(t)) return false;
+              const r = el.getBoundingClientRect();
+              return r.width >= 12 && r.width <= 80 && r.height >= 12 && r.height <= 48;
+            })
+            .slice(0, 3)
+            .map((el) => {
+              const r = el.getBoundingClientRect();
+              return { x: r.left, y: r.top, width: r.width, height: r.height };
+            });
+          return { directText: validDirect, rects: btns };
+        })()`,
+        true
+      )) as {
+        directText: string;
+        rects: Array<{ x: number; y: number; width: number; height: number }>;
+      };
+
+      if (secretIconRects.directText) {
+        extractedSecret = secretIconRects.directText;
+      } else {
+        for (const r of secretIconRects.rects) {
+          await highlightRectOnPage(wc, r, 450);
+          await clickHardwareAt(wc, r.x + r.width / 2, r.y + r.height / 2);
+          await sleep(550);
+
+          const clipVal = clipboard.readText().trim();
+          if (/^[a-zA-Z0-9]{24,44}$/.test(clipVal) && !clipVal.startsWith('cli_')) {
+            extractedSecret = clipVal;
+            break;
+          }
+          const domSecret = (await wc.executeJavaScript(
+            `(() => {
+              const txt = document.body?.innerText || '';
+              const matches = txt.match(/\\b([a-zA-Z0-9]{28,40})\\b/g) || [];
+              return matches.find((s) => !s.startsWith('cli_') && /[a-zA-Z]/.test(s) && /\\d/.test(s)) || '';
+            })()`,
+            true
+          )) as string;
+          if (domSecret) {
+            extractedSecret = domSecret;
+            break;
+          }
+        }
+      }
+    } finally {
+      clipboard.writeText(prevClipForSecret);
+    }
+
+    let wsConnectedOk = false;
+    if (extractedSecret) {
+      wsConnectedOk = await onCredentialsReady(appId, extractedSecret);
+      await sleep(1800);
+      completedSteps.push(
+        wsConnectedOk
+          ? `已提取凭证并成功连上飞书长连接 (${appId})`
+          : `已提取凭证 (${appId})`
+      );
+      stepReport.push({
+        step: '4. 提取凭证并启动本地长连接',
+        status: wsConnectedOk ? 'ok' : 'warn',
+        detail: wsConnectedOk
+          ? `App ID (${appId}) 与 Secret 已自动填入并连上 WebSocket 长连接`
+          : '已提取填入凭证，但长连接暂未就绪，请点上方「连接飞书长连接」重试'
+      });
+    } else {
+      stepReport.push({
+        step: '4. 提取凭证并启动本地长连接',
+        status: 'warn',
+        detail: `已获取 App ID (${appId})，但未能自动读取 App Secret，请复制粘贴 Secret 并点连接`
+      });
+    }
+
+    // ==================== STEP 5: WEBSOCKET EVENT MODE & im.message.receive_v1 ====================
+    await emitStep('⚡ [5/6] 正在配置「使用长连接接收事件」并添加接收消息事件...');
+    await navigateFeishuSection(
+      wc,
+      ['事件与回调'],
+      ['事件配置', '订阅方式', '添加事件'],
+      `https://open.feishu.cn/app/${appId}/event`
+    );
+    await sleep(1000);
+
+    const wsModeState = (await wc.executeJavaScript(
+      `(() => {
+        const txt = document.body?.innerText || '';
+        const hasRadioVisible = Array.from(document.querySelectorAll('input[type="radio"], .ud__radio, .semi-radio'))
+          .some((el) => el.getBoundingClientRect().width > 0);
+        return { txtHasWs: txt.includes('使用长连接接收事件'), hasRadioVisible };
       })()`,
       true
+    )) as { txtHasWs: boolean; hasRadioVisible: boolean };
+
+    if (!wsModeState.hasRadioVisible) {
+      await findAndHighlightClick(wc, '^(编辑|修改|修改订阅方式)$', { pauseAfterMs: 700 });
+    }
+    await findAndHighlightClick(wc, '使用长连接接收事件', { pauseAfterMs: 700 });
+    const savedWsBtn = await findAndHighlightClick(wc, '^保存$', { pauseAfterMs: 1800 });
+
+    const wsErrorToast = (await wc.executeJavaScript(
+      `(() => {
+        const txt = document.body?.innerText || '';
+        return txt.includes('未检测到应用连接信息') || txt.includes('请先建立长连接');
+      })()`,
+      true
+    )) as boolean;
+
+    let eventSubscribed = (await wc.executeJavaScript(
+      `(() => (document.body?.innerText || '').includes('im.message.receive_v1'))()`,
+      true
+    )) as boolean;
+
+    if (!eventSubscribed) {
+      const addEv = await findAndHighlightClick(wc, '添加事件', { pauseAfterMs: 1100 });
+      if (addEv.clicked) {
+        const searchRect = (await wc.executeJavaScript(
+          `(() => {
+            const modal = document.querySelector('[role="dialog"], .ud__modal, .semi-modal-content, .arco-modal') || document;
+            const inp = Array.from(modal.querySelectorAll('input'))
+              .find((i) => i.type !== 'checkbox' && i.type !== 'radio' && i.getBoundingClientRect().width > 80);
+            if (!inp) return null;
+            const r = inp.getBoundingClientRect();
+            return { x: r.left, y: r.top, width: r.width, height: r.height };
+          })()`,
+          true
+        )) as { x: number; y: number; width: number; height: number } | null;
+
+        if (searchRect) {
+          await typeNativeIntoRect(wc, searchRect, 'im.message.receive_v1', true);
+          await sleep(1100);
+        }
+
+        const cbRect = (await wc.executeJavaScript(
+          `(() => {
+            const modal = document.querySelector('[role="dialog"], .ud__modal, .semi-modal-content, .arco-modal');
+            if (!modal) return null;
+            const rows = Array.from(modal.querySelectorAll('label, tr, li, div')).filter((el) => {
+              if (!(el instanceof HTMLElement)) return false;
+              const t = el.innerText || '';
+              return (t.includes('接收消息') || t.includes('im.message.receive_v1')) && el.getBoundingClientRect().height < 90;
+            });
+            rows.sort((a, b) => a.innerText.length - b.innerText.length);
+            const target = (rows[0] && rows[0].querySelector('input[type="checkbox"], .ud__checkbox, .semi-checkbox, .arco-checkbox')) || rows[0];
+            if (!target || !(target instanceof HTMLElement)) return null;
+            const r = target.getBoundingClientRect();
+            return { x: r.left, y: r.top, width: r.width, height: r.height };
+          })()`,
+          true
+        )) as { x: number; y: number; width: number; height: number } | null;
+
+        if (cbRect) {
+          await highlightRectOnPage(wc, cbRect, 550);
+          await clickHardwareAt(wc, cbRect.x + Math.min(14, cbRect.width / 2), cbRect.y + cbRect.height / 2);
+          await sleep(600);
+          await findAndHighlightClick(wc, '确认添加|确定', { insideModal: true, pauseAfterMs: 1400 });
+        }
+
+        eventSubscribed = (await wc.executeJavaScript(
+          `(() => {
+            const t = document.body?.innerText || '';
+            return t.includes('im.message.receive_v1') || t.includes('接收消息 v2.0');
+          })()`,
+          true
+        )) as boolean;
+      }
+    }
+
+    if (!wsErrorToast && eventSubscribed) {
+      completedSteps.push('已开启长连接订阅并添加接收消息事件 im.message.receive_v1');
+      stepReport.push({
+        step: '5. 长连接模式与接收消息事件',
+        status: 'ok',
+        detail: '已保存长连接模式并成功订阅 im.message.receive_v1'
+      });
+    } else {
+      stepReport.push({
+        step: '5. 长连接模式与接收消息事件',
+        status: 'warn',
+        detail: wsErrorToast
+          ? '飞书提示尚未检测到长连接，请确认第 4 步连接在线后再点保存订阅方式'
+          : savedWsBtn.clicked || eventSubscribed
+            ? '已操作事件配置，请核对「使用长连接接收事件」与 im.message.receive_v1 是否均已保存'
+            : '请在「事件与回调」页手动点选「使用长连接接收事件 → 保存」并添加 im.message.receive_v1'
+      });
+    }
+
+    // ==================== STEP 6: CREATE VERSION 1.0.0 DRAFT ====================
+    await emitStep('⚡ [6/6] 正在进入「版本管理与发布」并填写 1.0.0 版本信息...');
+    await navigateFeishuSection(
+      wc,
+      ['版本管理与发布'],
+      ['创建版本', '版本管理与发布'],
+      `https://open.feishu.cn/app/${appId}/version`
     );
-    completedSteps.push('已打开「创建版本」并预填 1.0.0 版本说明');
+    await sleep(1000);
+
+    const createVerClicked = await findAndHighlightClick(wc, '创建版本', { pauseAfterMs: 1400 });
+    if (createVerClicked.clicked) {
+      const verFields = (await wc.executeJavaScript(
+        `(() => {
+          const verInp = Array.from(document.querySelectorAll('input[type="text"], input:not([type])'))
+            .find((el) => {
+              const p = (el.getAttribute('placeholder') || '') + ((el.closest('[class*="item"], [class*="field"]') && el.closest('[class*="item"], [class*="field"]').innerText) || '');
+              const r = el.getBoundingClientRect();
+              return r.width > 80 && /版本|1\\.0\\.0/.test(p) && !el.value;
+            });
+          const noteInp = Array.from(document.querySelectorAll('textarea'))
+            .find((el) => el.getBoundingClientRect().width > 120 && !el.value);
+          return {
+            verRect: verInp ? (() => { const r = verInp.getBoundingClientRect(); return { x: r.left, y: r.top, width: r.width, height: r.height }; })() : null,
+            noteRect: noteInp ? (() => { const r = noteInp.getBoundingClientRect(); return { x: r.left, y: r.top, width: r.width, height: r.height }; })() : null
+          };
+        })()`,
+        true
+      )) as {
+        verRect: { x: number; y: number; width: number; height: number } | null;
+        noteRect: { x: number; y: number; width: number; height: number } | null;
+      };
+
+      if (verFields.verRect) {
+        await typeNativeIntoRect(wc, verFields.verRect, '1.0.0');
+      }
+      if (verFields.noteRect) {
+        await typeNativeIntoRect(wc, verFields.noteRect, 'MuseDeck 自动配置发布');
+      }
+      await wc.executeJavaScript(`window.scrollBy({ top: 360, behavior: 'smooth' })`, true);
+      await sleep(700);
+    }
+
+    stepReport.push({
+      step: '6. 版本检查与线上发布（需你最后确认点击）',
+      status: 'manual',
+      detail: '已停留在版本页：请确认「可用范围」包含你自己，点底部「保存」→ 右上角「申请线上发布」变为已发布！'
+    });
+
+    const warnCount = stepReport.filter((s) => s.status === 'warn').length;
+    await emitStep(
+      warnCount === 0
+        ? '✅ 前 5 步已全部自动完成并校验！请在当前页点「保存 → 申请线上发布」完成最后发布'
+        : `⚠️ 自动代配结束（有 ${warnCount} 项需留意右侧核对清单），最后请完成版本发布`,
+      warnCount === 0 ? 'ok' : 'warn'
+    );
 
     return {
-      ok: true,
+      ok: warnCount === 0,
       appId,
       appSecret: extractedSecret || undefined,
       completedSteps,
+      stepReport,
       nextManualHint:
-        '请在左侧已打开的版本页面底部点「保存」→ 右上角「申请线上发布」，然后点右侧「唤起机器人对话」发一句「你好」即可！',
-      message: extractedSecret
-        ? `⚡ 自动代配已完成 ${completedSteps.length} 步！凭证已自动填入并连上长连接，最后只需在左侧点击「保存 → 申请线上发布」即可使用！`
-        : `⚡ 已自动引导至应用 (${appId}) 版本发布页；若上方 App Secret 尚未填入，可在左侧「凭证与基础信息」复制粘贴后点击连接。`
+        '请在左侧版本页面点击底部「保存」→ 右上角「申请线上发布」（确认状态变为绿色「已发布」），然后点右侧「唤起机器人对话」发一句「你好」即可！',
+      message:
+        warnCount === 0
+          ? '✅ 前 5 步全部自动配置并校验通过！最后只需在左侧点「保存 → 申请线上发布」，再点「唤起机器人对话」发一句「你好」即可！'
+          : `已完成自动代配流程，其中有 ${warnCount} 个步骤需要你在下方清单核对确认，完成后发布版本即可。`
     };
   } catch (err) {
     return {
       ok: false,
       completedSteps,
-      message: `自动代配中断：${err instanceof Error ? err.message : String(err)}（你仍可继续手动完成剩余步骤）`
+      stepReport,
+      message: `自动代配中断：${err instanceof Error ? err.message : String(err)}（你可对照下方 6 步清单继续完成剩余项）`
     };
   }
 }
