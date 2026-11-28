@@ -29,6 +29,30 @@ export interface FmcApi {
     mode: 'muse' | 'preset',
     profilePatch?: Partial<import('./types').UserProfileConfig>
   ) => Promise<{ ok: boolean; mode: 'muse' | 'preset'; message: string; state?: FmcState }>;
+  recommendSingleCliRoles: (
+    cliId: string,
+    cliName: string,
+    modelId: string,
+    mode: 'muse' | 'preset'
+  ) => Promise<{
+    ok: boolean;
+    mode: 'muse' | 'preset';
+    message: string;
+    recommendation?: {
+      cliId: string;
+      defaultModel?: string;
+      reasoningEffort?: import('./types').ReasoningEffort;
+      roleWeights: Record<string, number>;
+      reason: string;
+    };
+  }>;
+  mutateCliPreset: (payload: {
+    action: 'activate' | 'save_new' | 'update_current' | 'delete';
+    presetId?: string;
+    name?: string;
+    dispatchPolicy?: 'muse_decide' | 'strict_custom';
+    description?: string;
+  }) => Promise<FmcState>;
   updateWorkflowConfig: (patch: Partial<import('./types').WorkflowConfig>) => Promise<FmcState>;
   getWorkflowStatus: () => Promise<import('./types').WorkflowRunState>;
   approveProject: () => Promise<import('./types').WorkflowRunState>;

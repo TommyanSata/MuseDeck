@@ -1178,13 +1178,14 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
                     )}
                   </div>
 
-                  {/* Friendly Reminder that User Can Modify Anytime Later */}
-                  <div className="mt-3 flex items-start gap-2 rounded-xl bg-[#f4f4f5] px-3 py-2 text-[11.5px] text-[#3f3f46]">
-                    <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[#18181b]" />
-                    <span>
-                      <strong>随时可自行修改：</strong>以上智能职能推荐仅帮你免去首次逐一配置的繁琐。进入 MuseDeck 后，你随时可在左侧菜单{' '}
-                      <strong>「应用 / CLI 雷达 → 配置」</strong> 或 <strong>「软件设置」</strong> 中手动增删职能标签、调节 0–5 权重、更换默认模型。
-                    </span>
+                  {/* Friendly Reminder + Quick Preset Squad Explanation */}
+                  <div className="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-xl bg-[#f4f4f5] px-3 py-2 text-[11.5px] text-[#3f3f46]">
+                    <div className="flex items-start gap-2">
+                      <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[#18181b]" />
+                      <span>
+                        <strong>支持多套预设组合 & 随时修改：</strong>当前已存入默认的「<strong>🤖 Muse 智能决策组</strong>」；进入软件后可在「应用 / CLI 雷达」保存多套自定义组合（既可让 Muse 动态选模型，也可一键切到你的自定义组合严格按你设定的模型分工），切换单个 CLI 模型时也支持一键智能推荐职能！
+                      </span>
+                    </div>
                   </div>
                 </section>
 
@@ -1642,6 +1643,7 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
                   appId={appId}
                   appSecret={appSecret}
                   botName={botNameDraft}
+                  onBotNameChange={setBotNameDraft}
                   liveGuide={liveGuide}
                   onNavigateFeishuUrl={(url) => void window.fmc.navigateEmbeddedView('feishu', url)}
                 />

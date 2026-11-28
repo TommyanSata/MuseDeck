@@ -31,6 +31,14 @@ export interface WhatsNewInfo {
 }
 
 export const BUILTIN_RELEASE_HIGHLIGHTS: Record<string, { title: string; highlights: string[] }> = {
+  '0.8.1': {
+    title: '顶置免打字一键代填栏 · 单 CLI 换模型智能推荐 · 多套编队预设组合',
+    highlights: [
+      '飞书向导顶部新增醒目的「⚡ 免打字一键代填快捷栏」（代填应用名称描述 / 7 项权限 JSON / 1.0.0 版本信息），检测到左侧打开对应弹窗时自动高亮提醒点击',
+      '在单个 CLI「配置」弹窗中切换模型时，新增「按此模型推荐」与「让 Muse 推荐」按钮（点击才干预更新职能与思考等级，保留完全自定义自由）',
+      '新增「预设编队组合」系统：支持在默认的「🤖 Muse 智能决策组」（Muse 动态选模型）与多套用户保存的「🛠️ 自定义分工组合」（严格按用户设定的模型与职能分工）之间一键切换'
+    ]
+  },
   '0.8.0': {
     title: '职业用途画像智能职能推荐 · 飞书 6 步实景高亮脉冲指引',
     highlights: [

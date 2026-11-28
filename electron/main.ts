@@ -43,12 +43,16 @@ import { FeishuSpotlightController } from './feishuSpotlightGuide';
 import { QuotaManager } from './quotaManager';
 import {
   buildMuseRoleRecommendationPrompt,
+  buildSingleCliMuseRolePrompt,
+  computeSingleCliModelRecommendation,
   computeSmartRoleRecommendations
 } from './roleRecommender';
 import { readLocalCliSessionMessages, scanLocalCliSessions } from './sessionScanner';
 import {
   AppSettings,
   CliId,
+  CliPresetCliSnapshot,
+  CliPresetGroup,
   CliUserConfig,
   FmcStore,
   UserProfileConfig,
@@ -1944,6 +1948,21 @@ function registerIpcHandlers(): void {
   ipcMain.handle('cli:saveConfig', (_ev, cliId: string, cfg: CliUserConfig) => {
     const st = store.update((s) => {
       s.cliConfigs[cliId] = cfg;
+      const activeId = s.activePresetId || 'preset-smart-default';
+      const targetPreset = (s.cliPresets || []).find((p) => p.id === activeId);
+      if (targetPreset) {
+        targetPreset.cliSnapshots = {
+          ...(targetPreset.cliSnapshots || {}),
+          [cliId]: {
+            enabled: Boolean(cfg.enabled),
+            defaultModel: cfg.defaultModel || '',
+            reasoningEffort: cfg.reasoningEffort,
+            roleWeights: cfg.roleWeights ? { ...cfg.roleWeights } : undefined,
+            roles: cfg.roles ? [...cfg.roles] : undefined
+          }
+        };
+        targetPreset.updatedAt = new Date().toISOString();
+      }
     });
     broadcast('state:changed', st);
     scheduleBriefAutoSync(2500);
@@ -2764,6 +2783,26 @@ function registerIpcHandlers(): void {
             lastRecommendationSummary: plan.summary,
             cliReasons: reasonsMap
           };
+          // Update smart preset snapshot as well
+          const presets = Array.isArray(s.cliPresets) ? s.cliPresets : [];
+          const activeId = s.activePresetId || 'preset-smart-default';
+          for (const p of presets) {
+            if (p.id === activeId || p.id === 'preset-smart-default') {
+              const snaps: Record<string, CliPresetCliSnapshot> = { ...(p.cliSnapshots || {}) };
+              for (const [cid, c] of Object.entries(s.cliConfigs)) {
+                snaps[cid] = {
+                  enabled: Boolean(c.enabled),
+                  defaultModel: c.defaultModel || '',
+                  reasoningEffort: c.reasoningEffort,
+                  roleWeights: c.roleWeights ? { ...c.roleWeights } : undefined,
+                  roles: c.roles ? [...c.roles] : undefined
+                };
+              }
+              p.cliSnapshots = snaps;
+              p.decisionWeights = { ...plan.decisionWeights };
+              p.updatedAt = new Date().toISOString();
+            }
+          }
         });
         broadcast('state:changed', nextSt);
         return {
@@ -2807,6 +2846,211 @@ function registerIpcHandlers(): void {
         message:
           '✨ 已将你的职业与用途发给 Muse！Muse 正在结合各家模型能力为你写入定制职能与权重（约 5~15 秒内下方卡片将自动实时刷新，后续也随时可改）...'
       };
+    }
+  );
+
+  ipcMain.handle(
+    'cli:recommendSingleModelRoles',
+    async (_ev, cliId: string, cliName: string, modelId: string, mode: 'muse' | 'preset') => {
+      const curState = store.getState();
+      const profile = curState.userProfile || { profession: '', purposes: [] };
+
+      if (mode === 'preset') {
+        const rec = computeSingleCliModelRecommendation(cliId, cliName, modelId, profile);
+        return {
+          ok: true,
+          mode: 'preset' as const,
+          message: `⚡ ${rec.reason}`,
+          recommendation: rec
+        };
+      }
+
+      const baseUrl = (tunnel?.getStatus().url || curState.controlApi.tunnelUrl || '')
+        .trim()
+        .replace(/\/+$/, '');
+      if (!baseUrl) {
+        return {
+          ok: false,
+          mode: 'muse' as const,
+          message: '尚未开启公网隧道连通 Muse，可先点击左侧「⚡ 按此模型秒级推荐」立即生成推荐职能！'
+        };
+      }
+      await syncLatestBriefToMuse(false);
+      const prompt = buildSingleCliMuseRolePrompt(
+        baseUrl,
+        curState.controlApi.token,
+        cliId,
+        cliName,
+        modelId,
+        profile
+      );
+      const sent = await sendTextToMuseChat(prompt);
+      if (!sent.ok) {
+        return {
+          ok: false,
+          mode: 'muse' as const,
+          message: `${sent.message}（可先点击「⚡ 按此模型秒级推荐」立即生成）`
+        };
+      }
+      return {
+        ok: true,
+        mode: 'muse' as const,
+        message: `✨ 已请 Muse 针对新模型「${modelId}」评估专属职能权重（约 5~12 秒内自动回填，你仍可自由微调）...`
+      };
+    }
+  );
+
+  ipcMain.handle(
+    'cli:mutatePreset',
+    (
+      _ev,
+      payload: {
+        action: 'activate' | 'save_new' | 'update_current' | 'delete';
+        presetId?: string;
+        name?: string;
+        dispatchPolicy?: 'muse_decide' | 'strict_custom';
+        description?: string;
+      }
+    ) => {
+      const captureAllSnapshots = (
+        configs: Record<string, CliUserConfig>
+      ): Record<string, CliPresetCliSnapshot> => {
+        const out: Record<string, CliPresetCliSnapshot> = {};
+        for (const [cid, cfg] of Object.entries(configs || {})) {
+          out[cid] = {
+            enabled: Boolean(cfg.enabled),
+            defaultModel: cfg.defaultModel || '',
+            reasoningEffort: cfg.reasoningEffort,
+            roleWeights: cfg.roleWeights ? { ...cfg.roleWeights } : undefined,
+            roles: cfg.roles ? [...cfg.roles] : undefined
+          };
+        }
+        return out;
+      };
+
+      const applyPresetToState = (s: ReturnType<FmcStore['getState']>, preset: CliPresetGroup) => {
+        for (const [cid, snap] of Object.entries(preset.cliSnapshots || {})) {
+          const prev = s.cliConfigs[cid] || {
+            enabled: snap.enabled,
+            authMode: 'oauth' as const,
+            apiKey: '',
+            baseUrl: '',
+            defaultModel: '',
+            extraArgs: ''
+          };
+          s.cliConfigs[cid] = {
+            ...prev,
+            enabled: snap.enabled,
+            defaultModel: snap.defaultModel || prev.defaultModel,
+            reasoningEffort: snap.reasoningEffort || prev.reasoningEffort,
+            roleWeights: snap.roleWeights ? { ...snap.roleWeights } : prev.roleWeights,
+            roles: snap.roles ? [...snap.roles] : prev.roles
+          };
+        }
+        if (preset.decisionWeights) {
+          s.workflow.decisionWeights = { ...preset.decisionWeights };
+        }
+        if (preset.dispatchPolicy === 'strict_custom') {
+          s.workflow.modelRoutingMode = 'user_default';
+        } else if (s.workflow.modelRoutingMode === 'user_default') {
+          s.workflow.modelRoutingMode = 'muse_ask';
+        }
+      };
+
+      const nextSt = store.update((s) => {
+        if (!Array.isArray(s.cliPresets) || s.cliPresets.length === 0) {
+          s.cliPresets = [
+            {
+              id: 'preset-smart-default',
+              name: 'Muse 智能决策组',
+              kind: 'smart',
+              dispatchPolicy: 'muse_decide',
+              description: '由 Muse 结合任务难度、评测榜单与可用模型池动态选择最优模型与分工',
+              cliSnapshots: captureAllSnapshots(s.cliConfigs),
+              updatedAt: new Date().toISOString()
+            }
+          ];
+        }
+        const curActiveId = s.activePresetId || 'preset-smart-default';
+        const nowIso = new Date().toISOString();
+
+        if (payload.action === 'activate' && payload.presetId) {
+          // 1. Save outgoing active preset's latest CLI states first
+          const outgoing = s.cliPresets.find((p) => p.id === curActiveId);
+          if (outgoing) {
+            outgoing.cliSnapshots = captureAllSnapshots(s.cliConfigs);
+            outgoing.decisionWeights = s.workflow.decisionWeights
+              ? { ...s.workflow.decisionWeights }
+              : undefined;
+            outgoing.updatedAt = nowIso;
+          }
+          // 2. Activate target preset
+          const target = s.cliPresets.find((p) => p.id === payload.presetId);
+          if (target) {
+            s.activePresetId = target.id;
+            applyPresetToState(s, target);
+          }
+        } else if (payload.action === 'save_new') {
+          const cleanName = (payload.name || '').trim() || `自定义组合 ${s.cliPresets.length}`;
+          const policy = payload.dispatchPolicy || 'strict_custom';
+          const newPreset: CliPresetGroup = {
+            id: `preset-${crypto.randomBytes(4).toString('hex')}`,
+            name: cleanName,
+            kind: 'custom',
+            dispatchPolicy: policy,
+            description:
+              payload.description?.trim() ||
+              (policy === 'strict_custom'
+                ? '严格按此自定义组合设定的模型与职能权重进行分工'
+                : '按此自定义职能分工，并允许 Muse 动态挑选具体模型'),
+            decisionWeights: s.workflow.decisionWeights
+              ? { ...s.workflow.decisionWeights }
+              : undefined,
+            cliSnapshots: captureAllSnapshots(s.cliConfigs),
+            updatedAt: nowIso
+          };
+          s.cliPresets.push(newPreset);
+          s.activePresetId = newPreset.id;
+          applyPresetToState(s, newPreset);
+        } else if (payload.action === 'update_current') {
+          const targetId = payload.presetId || curActiveId;
+          const target = s.cliPresets.find((p) => p.id === targetId);
+          if (target) {
+            if (payload.name && payload.name.trim() && target.kind !== 'smart') {
+              target.name = payload.name.trim();
+            }
+            if (payload.dispatchPolicy) {
+              target.dispatchPolicy = payload.dispatchPolicy;
+            }
+            if (payload.description !== undefined) {
+              target.description = payload.description.trim();
+            }
+            target.cliSnapshots = captureAllSnapshots(s.cliConfigs);
+            target.decisionWeights = s.workflow.decisionWeights
+              ? { ...s.workflow.decisionWeights }
+              : undefined;
+            target.updatedAt = nowIso;
+            if (s.activePresetId === target.id) {
+              applyPresetToState(s, target);
+            }
+          }
+        } else if (payload.action === 'delete' && payload.presetId) {
+          if (payload.presetId !== 'preset-smart-default') {
+            s.cliPresets = s.cliPresets.filter((p) => p.id !== payload.presetId);
+            if (s.activePresetId === payload.presetId) {
+              const fallback = s.cliPresets[0];
+              if (fallback) {
+                s.activePresetId = fallback.id;
+                applyPresetToState(s, fallback);
+              }
+            }
+          }
+        }
+      });
+
+      broadcast('state:changed', nextSt);
+      scheduleBriefAutoSync(2500);
+      return nextSt;
     }
   );
 

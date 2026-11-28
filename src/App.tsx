@@ -1268,6 +1268,8 @@ export const App: React.FC = () => {
             clis={clis}
             scanning={scanning}
             userProfile={state.userProfile}
+            activePresetId={state.activePresetId}
+            cliPresets={state.cliPresets}
             onRescan={() => void rescanClis()}
             onSaveConfig={handleSaveCliConfig}
           />

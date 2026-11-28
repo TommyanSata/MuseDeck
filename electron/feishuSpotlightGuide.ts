@@ -14,6 +14,7 @@ export interface FeishuLiveGuideState {
   receiveEventAdded: boolean;
   onVersionPage: boolean;
   versionPublished: boolean;
+  openModalKind?: 'create_app' | 'import_json' | 'create_version' | null;
   activeTargetHint: string;
   spotlightEnabled: boolean;
 }
@@ -31,6 +32,7 @@ interface PageProbeResult {
   receiveEventAdded: boolean;
   onVersionPage: boolean;
   versionPublished: boolean;
+  openModalKind: 'create_app' | 'import_json' | 'create_version' | null;
   recentBaseInfoClickMsAgo: number;
   activeTargetHint: string;
 }
@@ -404,6 +406,7 @@ export class FeishuSpotlightController {
               receiveEventAdded,
               onVersionPage,
               versionPublished,
+              openModalKind: null,
               recentBaseInfoClickMsAgo,
               activeTargetHint: '已暂停实景高亮框（可随时重新开启）'
             };
@@ -470,6 +473,15 @@ export class FeishuSpotlightController {
             document.querySelectorAll('[role="dialog"], .ud__modal, .semi-modal-content, .arco-modal')
           ).filter((m) => m instanceof HTMLElement && isVis(m) && m.getBoundingClientRect().width > 160);
           const topModal = openModals.length > 0 ? openModals[openModals.length - 1] : null;
+
+          let openModalKind = null;
+          if (!detectedAppId && topModal && topModal.querySelector('input')) {
+            openModalKind = 'create_app';
+          } else if (onAuthPage && topModal && topModal.querySelector('.monaco-editor, textarea')) {
+            openModalKind = 'import_json';
+          } else if (onVersionPage && !findBtn(/^创建版本$/) && document.querySelector('textarea')) {
+            openModalKind = 'create_version';
+          }
 
           let targetEl = null;
           let tipText = '';
@@ -820,6 +832,7 @@ export class FeishuSpotlightController {
             receiveEventAdded,
             onVersionPage,
             versionPublished,
+            openModalKind,
             recentBaseInfoClickMsAgo,
             activeTargetHint: tipText || bannerText
           };
@@ -872,6 +885,7 @@ export class FeishuSpotlightController {
         receiveEventAdded: probe.receiveEventAdded,
         onVersionPage: probe.onVersionPage,
         versionPublished: probe.versionPublished,
+        openModalKind: probe.openModalKind,
         activeTargetHint: probe.activeTargetHint,
         spotlightEnabled: this.spotlightEnabled
       };

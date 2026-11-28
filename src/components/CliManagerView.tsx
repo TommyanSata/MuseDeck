@@ -2,9 +2,11 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
   Activity,
   ArrowUpCircle,
+  BookmarkPlus,
   Check,
   CheckCircle2,
   Download,
+  Layers,
   Loader2,
   Plus,
   RefreshCw,
@@ -17,6 +19,7 @@ import {
 } from 'lucide-react';
 import {
   ApiProtocol,
+  CliPresetGroup,
   CliUpdateInfo,
   CliUserConfig,
   DetectedCli,
@@ -99,6 +102,8 @@ interface CliManagerViewProps {
   clis: DetectedCli[];
   scanning: boolean;
   userProfile?: UserProfileConfig;
+  activePresetId?: string;
+  cliPresets?: CliPresetGroup[];
   onRescan: () => void;
   onSaveConfig: (cliId: string, config: CliUserConfig) => Promise<void>;
   compact?: boolean;
@@ -118,16 +123,27 @@ export const CliManagerView: React.FC<CliManagerViewProps> = ({
   clis,
   scanning,
   userProfile,
+  activePresetId = 'preset-smart-default',
+  cliPresets = [],
   onRescan,
   onSaveConfig,
   compact = false
 }) => {
   const [editingCli, setEditingCli] = useState<DetectedCli | null>(null);
   const [draft, setDraft] = useState<CliUserConfig | null>(null);
+  const [openedModel, setOpenedModel] = useState('');
+  const [singleModelRecBusy, setSingleModelRecBusy] = useState<'muse' | 'preset' | null>(null);
+  const [singleModelRecTip, setSingleModelRecTip] = useState('');
   const [saving, setSaving] = useState(false);
   const [scanningModels, setScanningModels] = useState(false);
   const [scannedModels, setScannedModels] = useState<string[]>([]);
   const [scanHint, setScanHint] = useState('');
+
+  // Preset Squad Saver Modal state
+  const [showSavePresetModal, setShowSavePresetModal] = useState(false);
+  const [newPresetName, setNewPresetName] = useState('');
+  const [newPresetPolicy, setNewPresetPolicy] = useState<'strict_custom' | 'muse_decide'>('strict_custom');
+  const [presetToast, setPresetToast] = useState('');
 
   // Smart Role Recommendation Modal state (available anytime in CLI Manager!)
   const [showRecommendModal, setShowRecommendModal] = useState(false);
@@ -142,6 +158,28 @@ export const CliManagerView: React.FC<CliManagerViewProps> = ({
     setPurpDraft(userProfile?.purposes || []);
     setNoteDraft(userProfile?.customNote || '');
   }, [userProfile?.profession, userProfile?.customNote, userProfile?.recommendedAt]);
+
+  // If Muse asynchronously applies single-CLI role recommendations while editor modal is open, sync them into draft!
+  useEffect(() => {
+    if (!editingCli) return;
+    const latest = clis.find((c) => c.id === editingCli.id);
+    if (!latest || !latest.config.roleWeights) return;
+    setDraft((prev) =>
+      prev
+        ? {
+            ...prev,
+            roleWeights: { ...latest.config.roleWeights },
+            roles: latest.config.roles ? [...latest.config.roles] : prev.roles,
+            reasoningEffort: latest.config.reasoningEffort || prev.reasoningEffort
+          }
+        : null
+    );
+    const museReason = userProfile?.cliReasons?.[editingCli.id];
+    if (museReason && singleModelRecBusy === null && userProfile?.lastRecommendationSource === 'muse') {
+      setSingleModelRecTip(`✨ Muse 推荐：${museReason}`);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userProfile?.recommendedAt]);
 
   // Endpoint latency test & quota/balance probe state (CC-Switch style)
   const [testingEndpoint, setTestingEndpoint] = useState(false);
@@ -270,6 +308,8 @@ export const CliManagerView: React.FC<CliManagerViewProps> = ({
     }
     setEditingCli(cli);
     setDraft({ ...cli.config, roleWeights: initRoleWeights });
+    setOpenedModel(cli.config.defaultModel || '');
+    setSingleModelRecTip('');
     setScannedModels(cli.models);
     setScanHint('');
     setEndpointResult(null);
@@ -565,10 +605,149 @@ export const CliManagerView: React.FC<CliManagerViewProps> = ({
       <div className={`flex-1 overflow-y-auto ${compact ? '' : 'px-6 py-6'}`}>
         <div className={compact ? 'space-y-4' : 'mx-auto max-w-[940px] space-y-6'}>
           {!compact && (
-            <div className="space-y-2">
-              <p className="text-[12.5px] text-[#71717a]">
-                支持一键安装 / 更新 / 卸载、实时版本比对、常用供应商预设及端点延迟测速。所有配置均保存在 MuseDeck 独立沙箱，绝不修改本机 CLI 原配置文件。
-              </p>
+            <div className="space-y-3">
+              {/* CLI Squad Presets Switcher: Smart Group vs User Custom Combinations */}
+              <section className="rounded-2xl border border-[#eaecef] bg-[#fafafa] p-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex items-center gap-2">
+                    <Layers className="h-4 w-4 text-[#18181b]" />
+                    <span className="text-[13px] font-semibold text-[#111827]">
+                      预设编队组合（支持一键切换「Muse 智能决策组」与「自定义分工组合」）
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setNewPresetName('');
+                      setNewPresetPolicy('strict_custom');
+                      setShowSavePresetModal(true);
+                    }}
+                    className="inline-flex items-center gap-1 rounded-lg border border-[#18181b] bg-white px-2.5 py-1 text-[11.5px] font-medium text-[#111827] transition-colors hover:bg-[#18181b] hover:text-white"
+                  >
+                    <BookmarkPlus className="h-3.5 w-3.5" />
+                    保存当前配置为新组合
+                  </button>
+                </div>
+
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  {(cliPresets.length > 0
+                    ? cliPresets
+                    : [
+                        {
+                          id: 'preset-smart-default',
+                          name: 'Muse 智能决策组',
+                          kind: 'smart' as const,
+                          dispatchPolicy: 'muse_decide' as const,
+                          cliSnapshots: {},
+                          updatedAt: ''
+                        }
+                      ]
+                  ).map((preset) => {
+                    const isActive = preset.id === activePresetId;
+                    const isSmart = preset.kind === 'smart';
+                    return (
+                      <div
+                        key={preset.id}
+                        className={`inline-flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-[12px] transition-all ${
+                          isActive
+                            ? 'border-[#18181b] bg-[#18181b] font-medium text-white shadow-2xs'
+                            : 'border-[#e4e4e7] bg-white text-[#3f3f46] hover:border-[#a1a1aa] hover:text-[#111827]'
+                        }`}
+                      >
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            await window.fmc.mutateCliPreset({
+                              action: 'activate',
+                              presetId: preset.id
+                            });
+                            setPresetToast(
+                              preset.dispatchPolicy === 'strict_custom'
+                                ? `已切换至「${preset.name}」：Muse 将严格按此自定义组合的模型与职能权重分工！`
+                                : `已切换至「${preset.name}」：Muse 将根据子任务动态选择最优模型与分工！`
+                            );
+                            setTimeout(() => setPresetToast(''), 5000);
+                          }}
+                          className="inline-flex items-center gap-1.5 text-left"
+                        >
+                          <span>{isSmart ? '🤖' : '🛠️'}</span>
+                          <span>{preset.name}</span>
+                          <span
+                            className={`rounded px-1.5 py-0.2 text-[10px] ${
+                              isActive
+                                ? 'bg-white/20 text-white'
+                                : 'bg-[#f4f4f5] text-[#71717a]'
+                            }`}
+                          >
+                            {preset.dispatchPolicy === 'strict_custom' ? '固定分工' : 'Muse 选模型'}
+                          </span>
+                        </button>
+                        {!isSmart && (
+                          <button
+                            type="button"
+                            onClick={async (e) => {
+                              e.stopPropagation();
+                              if (!window.confirm(`确定删除预设组合「${preset.name}」吗？`)) return;
+                              await window.fmc.mutateCliPreset({
+                                action: 'delete',
+                                presetId: preset.id
+                              });
+                            }}
+                            className={`ml-0.5 rounded p-0.5 transition-colors ${
+                              isActive
+                                ? 'text-white/70 hover:bg-white/20 hover:text-white'
+                                : 'text-[#a1a1aa] hover:bg-red-50 hover:text-red-600'
+                            }`}
+                            title="删除此预设组合"
+                          >
+                            <X className="h-3 w-3" />
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Active Preset Policy Toggle */}
+                {(() => {
+                  const curPreset = cliPresets.find((p) => p.id === activePresetId);
+                  if (!curPreset) return null;
+                  return (
+                    <div className="mt-2.5 flex flex-wrap items-center justify-between gap-2 border-t border-[#e4e4e7]/70 pt-2.5 text-[11.5px] text-[#52525b]">
+                      <span>
+                        当前生效：<strong>{curPreset.name}</strong> —{' '}
+                        {curPreset.dispatchPolicy === 'strict_custom'
+                          ? 'Muse 严格按下方各 CLI 设定的模型与职能权重派单（适合精细固定分工）'
+                          : 'Muse 结合下方职能倾向，按子任务难度从可用模型池动态选模型（适合智能省心）'}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          const nextPol =
+                            curPreset.dispatchPolicy === 'strict_custom'
+                              ? 'muse_decide'
+                              : 'strict_custom';
+                          await window.fmc.mutateCliPreset({
+                            action: 'update_current',
+                            presetId: curPreset.id,
+                            dispatchPolicy: nextPol
+                          });
+                        }}
+                        className="rounded-lg border border-[#e4e4e7] bg-white px-2.5 py-0.5 text-[11px] font-medium text-[#111827] hover:bg-[#f4f4f5]"
+                      >
+                        切换为：{curPreset.dispatchPolicy === 'strict_custom' ? '允许 Muse 动态选模型' : '固定按我设定的模型分工'}
+                      </button>
+                    </div>
+                  );
+                })()}
+
+                {presetToast && (
+                  <div className="mt-2 rounded-lg bg-emerald-50 px-3 py-1.5 text-[11px] font-medium text-emerald-900 ring-1 ring-emerald-200">
+                    {presetToast}
+                  </div>
+                )}
+              </section>
+
               {userProfile?.lastRecommendationSummary && (
                 <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-emerald-200/80 bg-emerald-50/60 px-3.5 py-2 text-[11.5px] text-emerald-950">
                   <span>✨ {userProfile.lastRecommendationSummary}</span>
@@ -918,12 +1097,94 @@ export const CliManagerView: React.FC<CliManagerViewProps> = ({
               </div>
 
               <div>
-                <div className="mb-1.5 flex items-center justify-between">
+                <div className="mb-1.5 flex flex-wrap items-center justify-between gap-1.5">
                   <label className="font-medium text-[#3f3f46]">
                     职能与独立权重（点击标签调节 0–5 权重）
                   </label>
-                  <span className="text-[10.5px] text-[#8a8f98]">0 = 不分配 · 5 = 最优先</span>
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      disabled={Boolean(singleModelRecBusy)}
+                      onClick={async () => {
+                        if (!editingCli || !draft) return;
+                        setSingleModelRecBusy('preset');
+                        try {
+                          const targetModel =
+                            draft.defaultModel.trim() || scannedModels[0] || editingCli.models[0] || '';
+                          const res = await window.fmc.recommendSingleCliRoles(
+                            editingCli.id,
+                            editingCli.name,
+                            targetModel,
+                            'preset'
+                          );
+                          if (res.recommendation) {
+                            const nextW = res.recommendation.roleWeights;
+                            setDraft({
+                              ...draft,
+                              roleWeights: nextW,
+                              roles: Object.entries(nextW)
+                                .filter(([, w]) => w > 0)
+                                .map(([r]) => r),
+                              reasoningEffort:
+                                res.recommendation.reasoningEffort || draft.reasoningEffort
+                            });
+                          }
+                          setSingleModelRecTip(res.message);
+                        } finally {
+                          setSingleModelRecBusy(null);
+                        }
+                      }}
+                      className="inline-flex items-center gap-1 rounded-lg border border-[#e4e4e7] bg-[#fafafa] px-2 py-0.5 text-[10.5px] font-medium text-[#111827] hover:bg-[#f4f4f5] disabled:opacity-50"
+                      title="根据上方当前所选模型的特性秒级生成推荐职能与思考等级（不满意可继续手动调整）"
+                    >
+                      <Wand2 className="h-3 w-3 text-amber-500" />
+                      按此模型推荐
+                    </button>
+                    <button
+                      type="button"
+                      disabled={Boolean(singleModelRecBusy)}
+                      onClick={async () => {
+                        if (!editingCli || !draft) return;
+                        setSingleModelRecBusy('muse');
+                        try {
+                          const targetModel =
+                            draft.defaultModel.trim() || scannedModels[0] || editingCli.models[0] || '';
+                          const res = await window.fmc.recommendSingleCliRoles(
+                            editingCli.id,
+                            editingCli.name,
+                            targetModel,
+                            'muse'
+                          );
+                          setSingleModelRecTip(res.message);
+                        } finally {
+                          setSingleModelRecBusy(null);
+                        }
+                      }}
+                      className="inline-flex items-center gap-1 rounded-lg bg-[#18181b] px-2 py-0.5 text-[10.5px] font-medium text-white hover:bg-[#27272a] disabled:opacity-50"
+                      title="让已连线的 Muse 评估当前所选模型并智能生成专属职能权重"
+                    >
+                      {singleModelRecBusy === 'muse' ? (
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                      ) : (
+                        <Sparkles className="h-3 w-3 text-amber-400" />
+                      )}
+                      让 Muse 推荐
+                    </button>
+                  </div>
                 </div>
+
+                {/* Gentle prompt when user manually switched model inside modal */}
+                {draft.defaultModel.trim() !== openedModel.trim() && !singleModelRecTip && (
+                  <div className="mb-2 rounded-xl border border-amber-200 bg-amber-50/80 px-2.5 py-1.5 text-[11px] text-amber-950">
+                    💡 检测到你已将模型切换为 <code className="font-mono font-semibold">{draft.defaultModel.trim() || '默认'}</code>：可点击右上角「<strong>按此模型推荐</strong>」或「<strong>让 Muse 推荐</strong>」匹配新模型职能，也可直接在下方手动点选！
+                  </div>
+                )}
+
+                {singleModelRecTip && (
+                  <div className="mb-2 rounded-xl border border-emerald-200 bg-emerald-50/70 px-2.5 py-1.5 text-[11px] leading-relaxed text-emerald-950">
+                    {singleModelRecTip}
+                  </div>
+                )}
 
                 <div className="flex flex-wrap items-center gap-1.5">
                   {Array.from(
@@ -1277,6 +1538,103 @@ export const CliManagerView: React.FC<CliManagerViewProps> = ({
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {/* Save New Custom Preset Squad Modal */}
+      {showSavePresetModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/25 p-4 backdrop-blur-[1px]">
+          <div className="w-full max-w-md rounded-2xl border border-[#e4e4e7] bg-white p-5 shadow-popover">
+            <div className="mb-3 flex items-center justify-between">
+              <h3 className="text-[14px] font-semibold text-[#111827]">
+                保存当前 CLI 配置为新预设组合
+              </h3>
+              <button
+                onClick={() => setShowSavePresetModal(false)}
+                className="rounded-lg p-1 text-[#8a8f98] hover:bg-[#f4f4f5] hover:text-[#111827]"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+            <div className="space-y-3 text-[12.5px]">
+              <p className="text-[11.5px] text-[#52525b]">
+                将保存当前所有 CLI 的启用开关、默认模型、思考等级与职能权重，方便你随时在「Muse 智能组」与多套自定义组合之间一键切换。
+              </p>
+              <div>
+                <label className="mb-1 block font-medium text-[#3f3f46]">预设组合名称</label>
+                <input
+                  autoFocus
+                  value={newPresetName}
+                  onChange={(e) => setNewPresetName(e.target.value)}
+                  placeholder="例如：科研攻坚组 / 日常省钱组合 / 全栈主力分工"
+                  className="w-full rounded-xl border border-[#e4e4e7] px-3 py-2 text-[12px] text-[#111827] outline-none focus:border-[#18181b]"
+                />
+              </div>
+              <div>
+                <label className="mb-1.5 block font-medium text-[#3f3f46]">该组合下的 Muse 调度方式</label>
+                <div className="space-y-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setNewPresetPolicy('strict_custom')}
+                    className={`w-full rounded-xl border p-2.5 text-left transition-colors ${
+                      newPresetPolicy === 'strict_custom'
+                        ? 'border-[#18181b] bg-[#fafafa]'
+                        : 'border-[#eaecef] hover:bg-[#fafafa]'
+                    }`}
+                  >
+                    <div className="text-[12px] font-semibold text-[#111827]">
+                      🛠️ 严格按此自定义组合分工（推荐）
+                    </div>
+                    <div className="mt-0.5 text-[11px] text-[#71717a]">
+                      锁定使用你在此组合里为每个 CLI 指定的模型、思考等级与职能权重进行拆单派发
+                    </div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setNewPresetPolicy('muse_decide')}
+                    className={`w-full rounded-xl border p-2.5 text-left transition-colors ${
+                      newPresetPolicy === 'muse_decide'
+                        ? 'border-[#18181b] bg-[#fafafa]'
+                        : 'border-[#eaecef] hover:bg-[#fafafa]'
+                    }`}
+                  >
+                    <div className="text-[12px] font-semibold text-[#111827]">
+                      🤖 参考此组合职能 + 允许 Muse 动态选模型
+                    </div>
+                    <div className="mt-0.5 text-[11px] text-[#71717a]">
+                      沿用此组合启用的 CLI 与职能倾向，但允许 Muse 按子任务难度从模型池动态选模型
+                    </div>
+                  </button>
+                </div>
+              </div>
+            </div>
+            <div className="mt-4 flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => setShowSavePresetModal(false)}
+                className="rounded-xl border border-[#e4e4e7] px-3.5 py-1.5 text-[12px] font-medium text-[#52525b] hover:bg-[#f4f4f5]"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  const name = newPresetName.trim() || `自定义组合 ${cliPresets.length}`;
+                  await window.fmc.mutateCliPreset({
+                    action: 'save_new',
+                    name,
+                    dispatchPolicy: newPresetPolicy
+                  });
+                  setShowSavePresetModal(false);
+                  setPresetToast(`✅ 已保存并激活预设组合：「${name}」`);
+                  setTimeout(() => setPresetToast(''), 4000);
+                }}
+                className="rounded-xl bg-[#18181b] px-4 py-1.5 text-[12px] font-medium text-white hover:bg-[#27272a]"
+              >
+                保存组合
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

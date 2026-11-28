@@ -120,6 +120,25 @@ export interface UserProfileConfig {
   cliReasons?: Record<string, string>;
 }
 
+export interface CliPresetCliSnapshot {
+  enabled: boolean;
+  defaultModel: string;
+  reasoningEffort?: ReasoningEffort;
+  roleWeights?: Record<string, number>;
+  roles?: string[];
+}
+
+export interface CliPresetGroup {
+  id: string;
+  name: string;
+  kind: 'smart' | 'custom';
+  dispatchPolicy: 'muse_decide' | 'strict_custom';
+  description?: string;
+  decisionWeights?: DecisionPriorityWeights;
+  cliSnapshots: Record<string, CliPresetCliSnapshot>;
+  updatedAt: string;
+}
+
 export interface MuseConfig {
   webUrl: string;
   autoBriefSynced: boolean;
@@ -211,6 +230,8 @@ export interface FmcState {
   lastSeenAppVersion?: string;
   permissionLevel: PermissionLevel;
   userProfile?: UserProfileConfig;
+  activePresetId?: string;
+  cliPresets?: CliPresetGroup[];
   settings: AppSettings;
   workflow: WorkflowConfig;
   feishu: FeishuConfig;
@@ -236,6 +257,18 @@ function defaultState(): FmcState {
       profession: '',
       purposes: []
     },
+    activePresetId: 'preset-smart-default',
+    cliPresets: [
+      {
+        id: 'preset-smart-default',
+        name: 'Muse 智能决策组',
+        kind: 'smart',
+        dispatchPolicy: 'muse_decide',
+        description: '由 Muse 结合任务难度、评测榜单与可用模型池动态选择最优模型与分工',
+        cliSnapshots: {},
+        updatedAt: now
+      }
+    ],
     settings: {
       fontSize: 'normal',
       fontFamily: 'system',
@@ -344,6 +377,11 @@ export class FmcStore {
           purposes: [],
           ...(parsed.userProfile || {})
         },
+        activePresetId: parsed.activePresetId || 'preset-smart-default',
+        cliPresets:
+          Array.isArray(parsed.cliPresets) && parsed.cliPresets.length > 0
+            ? parsed.cliPresets
+            : base.cliPresets,
         settings: { ...base.settings, ...(parsed.settings || {}) },
         workflow: { ...base.workflow, ...(parsed.workflow || {}) },
         feishu: { ...base.feishu, ...(parsed.feishu || {}) },

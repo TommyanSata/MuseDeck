@@ -160,6 +160,15 @@ export function buildMuseBrief(
       ? `\n## 1.5 用户身份与使用目的画像（派单与沟通时请贴合用户背景）\n- **职业 / 身份**: ${uProf.profession || '未指定'}\n- **核心用途**: ${(uProf.purposes || []).join('、') || '日常开发与自动化'}\n${uProf.customNote ? `- **补充说明**: ${uProf.customNote}\n` : ''}`
       : '';
 
+  const activePreset = (state.cliPresets || []).find(
+    (p) => p.id === (state.activePresetId || 'preset-smart-default')
+  );
+  const activePresetLine = activePreset
+    ? activePreset.dispatchPolicy === 'strict_custom'
+      ? `\n- **当前激活 CLI 编队组合**: \`${activePreset.name}\`（**用户自定义分工组 · 严格执行**——请严格按照下方各已启用 CLI 设定的默认模型 \`defaultModel\`、思考等级与 \`职能权重\` 进行拆单分工，禁止擅自覆盖模型！）`
+      : `\n- **当前激活 CLI 编队组合**: \`${activePreset.name}\`（**Muse 智能决策组**——请结合子任务难度、权威榜单与各 CLI 的 \`availableModels\` 动态为每个子任务挑选最优 CLI + 具体模型 + 思考等级！）`
+    : '';
+
   return `# MuseDeck 本地多智能体调度协议 (Muse Supervisor Brief)
 
 你现在是我电脑本地 **MuseDeck** 的总控监督者（Supervisor & Evaluator）。
@@ -167,7 +176,7 @@ export function buildMuseBrief(
 
 ## 1. 控制接口信息
 - **Base URL**: \`${baseUrl}\`
-- **Authorization Header**: \`Authorization: Bearer ${state.controlApi.token}\`${userProfileBlock}
+- **Authorization Header**: \`Authorization: Bearer ${state.controlApi.token}\`${activePresetLine}${userProfileBlock}
 ${baseUrl.includes('.ts.net') ? '- **公网说明**: 该 `.ts.net` 地址已开启 **Tailscale Funnel 公网 443 HTTPS 暴露**，**不需要**加入我的 Tailscale 内网，请直接用普通 HTTPS 请求访问（无需引导我批准入网）。\n' : ''}
 
 ## 2. 当前已启用的本地 CLI 节点（按职能权重路由）
@@ -385,6 +394,14 @@ export class ControlServer {
           builtinBrowserApi: '/api/v1/browser/open'
         },
         enabledClis: enabledCliSummary,
+        activePreset: (() => {
+          const ap = (st.cliPresets || []).find(
+            (p) => p.id === (st.activePresetId || 'preset-smart-default')
+          );
+          return ap
+            ? { id: ap.id, name: ap.name, kind: ap.kind, dispatchPolicy: ap.dispatchPolicy }
+            : undefined;
+        })(),
         userProfile: st.userProfile || undefined,
         userHabits: wf.userHabits || [],
         openQuestions: openQs
@@ -903,6 +920,26 @@ export class ControlServer {
             summary || `Muse 已根据你的职业与用途自动更新了 ${appliedCount} 个 CLI 的职能与模型配置。`,
           cliReasons: reasonsMap
         };
+
+        // Sync updated CLI snapshots into the active preset (and always keep smart preset updated when in smart mode)
+        const presets = Array.isArray(s.cliPresets) ? s.cliPresets : [];
+        const activeId = s.activePresetId || 'preset-smart-default';
+        for (const p of presets) {
+          if (p.id === activeId || p.id === 'preset-smart-default') {
+            const snaps = { ...(p.cliSnapshots || {}) };
+            for (const [cid, cfg] of Object.entries(s.cliConfigs)) {
+              snaps[cid] = {
+                enabled: Boolean(cfg.enabled),
+                defaultModel: cfg.defaultModel || '',
+                reasoningEffort: cfg.reasoningEffort,
+                roleWeights: cfg.roleWeights ? { ...cfg.roleWeights } : undefined,
+                roles: cfg.roles ? [...cfg.roles] : undefined
+              };
+            }
+            p.cliSnapshots = snaps;
+            p.updatedAt = new Date().toISOString();
+          }
+        }
       });
 
       this.onStateChanged();

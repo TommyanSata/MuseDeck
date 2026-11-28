@@ -21,6 +21,14 @@ contextBridge.exposeInMainWorld('fmc', {
     ipcRenderer.invoke('profile:update', patch),
   recommendCliRoles: (mode: 'muse' | 'preset', profilePatch?: Record<string, unknown>) =>
     ipcRenderer.invoke('cli:recommendRoles', mode, profilePatch),
+  recommendSingleCliRoles: (
+    cliId: string,
+    cliName: string,
+    modelId: string,
+    mode: 'muse' | 'preset'
+  ) => ipcRenderer.invoke('cli:recommendSingleModelRoles', cliId, cliName, modelId, mode),
+  mutateCliPreset: (payload: Record<string, unknown>) =>
+    ipcRenderer.invoke('cli:mutatePreset', payload),
   updateWorkflowConfig: (patch: Record<string, unknown>) =>
     ipcRenderer.invoke('workflow:updateConfig', patch),
   getWorkflowStatus: () => ipcRenderer.invoke('workflow:status'),

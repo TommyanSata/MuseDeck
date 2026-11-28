@@ -334,6 +334,25 @@ export interface UserProfileConfig {
   cliReasons?: Record<string, string>;
 }
 
+export interface CliPresetCliSnapshot {
+  enabled: boolean;
+  defaultModel: string;
+  reasoningEffort?: ReasoningEffort;
+  roleWeights?: Record<string, number>;
+  roles?: string[];
+}
+
+export interface CliPresetGroup {
+  id: string;
+  name: string;
+  kind: 'smart' | 'custom';
+  dispatchPolicy: 'muse_decide' | 'strict_custom';
+  description?: string;
+  decisionWeights?: DecisionPriorityWeights;
+  cliSnapshots: Record<string, CliPresetCliSnapshot>;
+  updatedAt: string;
+}
+
 export interface FeishuLiveGuideState {
   url: string;
   loggedIn: boolean;
@@ -347,6 +366,7 @@ export interface FeishuLiveGuideState {
   receiveEventAdded: boolean;
   onVersionPage: boolean;
   versionPublished: boolean;
+  openModalKind?: 'create_app' | 'import_json' | 'create_version' | null;
   activeTargetHint: string;
   spotlightEnabled: boolean;
 }
@@ -356,6 +376,8 @@ export interface FmcState {
   lastSeenAppVersion?: string;
   permissionLevel: PermissionLevel;
   userProfile?: UserProfileConfig;
+  activePresetId?: string;
+  cliPresets?: CliPresetGroup[];
   settings?: AppSettings;
   workflow?: WorkflowConfig;
   feishu: FeishuConfig;

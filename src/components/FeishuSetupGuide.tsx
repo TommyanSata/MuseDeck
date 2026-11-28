@@ -51,6 +51,7 @@ interface FeishuSetupGuideProps {
   appId?: string;
   appSecret?: string;
   botName?: string;
+  onBotNameChange?: (name: string) => void;
   liveGuide?: FeishuLiveGuideState | null;
   onNavigateFeishuUrl?: (url: string) => void;
   onHelperMessage?: (msg: string) => void;
@@ -63,6 +64,7 @@ export const FeishuSetupGuide: React.FC<FeishuSetupGuideProps> = ({
   appId = '',
   appSecret = '',
   botName = 'MuseDeck',
+  onBotNameChange,
   liveGuide = null,
   onNavigateFeishuUrl,
   onHelperMessage,
@@ -74,6 +76,11 @@ export const FeishuSetupGuide: React.FC<FeishuSetupGuideProps> = ({
   const [showNotFoundHelp, setShowNotFoundHelp] = useState(false);
   const [spotlightOn, setSpotlightOn] = useState(true);
   const [localTip, setLocalTip] = useState('');
+  const [nameInput, setNameInput] = useState(botName || 'MuseDeck');
+
+  useEffect(() => {
+    if (botName) setNameInput(botName);
+  }, [botName]);
 
   const trimmedAppId = (appId || liveGuide?.detectedAppId || '').trim();
   const validCliAppId = /^cli_[a-zA-Z0-9]+$/.test(trimmedAppId) ? trimmedAppId : '';
@@ -117,7 +124,8 @@ export const FeishuSetupGuide: React.FC<FeishuSetupGuideProps> = ({
   };
 
   const handleQuickFill = async (kind: 'app_info' | 'permission_json' | 'version_draft') => {
-    const res = await window.fmc.quickFillFeishuStep(kind, { botName });
+    const effectiveName = (nameInput || botName || 'MuseDeck').trim() || 'MuseDeck';
+    const res = await window.fmc.quickFillFeishuStep(kind, { botName: effectiveName });
     if (kind === 'permission_json') {
       setCopiedKey('json');
       setTimeout(() => setCopiedKey(''), 2200);
@@ -219,8 +227,8 @@ export const FeishuSetupGuide: React.FC<FeishuSetupGuideProps> = ({
 
   return (
     <div className="space-y-3 text-[12px] text-[#3f3f46]">
-      {/* Spotlight Header + Live Progress Bar */}
-      <div className="rounded-2xl border border-[#eaecef] bg-white p-3.5">
+      {/* Spotlight Header + Top-Pinned Prominent One-Click Quick-Fill Toolbar */}
+      <div className="rounded-2xl border border-[#eaecef] bg-white p-3.5 shadow-2xs">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>
             <div className="flex items-center gap-1.5">
@@ -232,7 +240,7 @@ export const FeishuSetupGuide: React.FC<FeishuSetupGuideProps> = ({
               </span>
             </div>
             <p className="mt-0.5 text-[11px] text-[#71717a]">
-              左侧网页已自动为你套上<strong>红色呼吸脉冲框 + 浮动气泡</strong>，跟着高亮位置手动点击最稳妥零出错！
+              左侧网页已自动套上<strong>红色呼吸脉冲框 + 浮动气泡</strong>；遇到需要打字填表的步骤，直接点下方<strong>「⚡ 一键代填」</strong>即可！
             </p>
           </div>
 
@@ -257,6 +265,73 @@ export const FeishuSetupGuide: React.FC<FeishuSetupGuideProps> = ({
           />
         </div>
 
+        {/* ALWAYS-VISIBLE Top-Pinned Quick-Fill Toolbar (Zero Scrolling Needed!) */}
+        <div className="mt-3 rounded-xl border border-amber-200/90 bg-amber-50/70 p-2.5">
+          <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+            <span className="inline-flex items-center gap-1 text-[11.5px] font-semibold text-amber-950">
+              <Wand2 className="h-3.5 w-3.5 text-amber-600" />
+              ⚡ 免打字一键代填快捷栏（左侧打开对应弹窗后点击即填）
+            </span>
+            <div className="flex items-center gap-1">
+              <span className="text-[10.5px] text-amber-900">机器人名称：</span>
+              <input
+                value={nameInput}
+                onChange={(e) => {
+                  setNameInput(e.target.value);
+                  onBotNameChange?.(e.target.value);
+                }}
+                placeholder="MuseDeck"
+                className="w-24 rounded-md border border-amber-300 bg-white px-2 py-0.5 text-[11px] text-[#111827] outline-none focus:border-[#18181b]"
+              />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-3">
+            <button
+              type="button"
+              onClick={() => void handleQuickFill('app_info')}
+              className={`inline-flex items-center justify-center gap-1 rounded-lg px-2.5 py-1.5 text-[11px] font-medium transition-colors ${
+                liveGuide?.openModalKind === 'create_app'
+                  ? 'bg-[#18181b] text-white ring-2 ring-amber-400 hover:bg-[#27272a]'
+                  : 'border border-amber-300 bg-white text-[#111827] hover:bg-amber-100/60'
+              }`}
+            >
+              <Wand2 className="h-3 w-3 text-amber-500" />
+              代填① 应用名称描述
+            </button>
+
+            <button
+              type="button"
+              onClick={() => void handleQuickFill('permission_json')}
+              className={`inline-flex items-center justify-center gap-1 rounded-lg px-2.5 py-1.5 text-[11px] font-medium transition-colors ${
+                liveGuide?.openModalKind === 'import_json'
+                  ? 'bg-[#18181b] text-white ring-2 ring-amber-400 hover:bg-[#27272a]'
+                  : 'border border-amber-300 bg-white text-[#111827] hover:bg-amber-100/60'
+              }`}
+            >
+              {copiedKey === 'json' ? (
+                <Check className="h-3 w-3 text-emerald-500" />
+              ) : (
+                <Wand2 className="h-3 w-3 text-amber-500" />
+              )}
+              {copiedKey === 'json' ? '已填入/复制 JSON' : '代填③ 7项权限JSON'}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => void handleQuickFill('version_draft')}
+              className={`inline-flex items-center justify-center gap-1 rounded-lg px-2.5 py-1.5 text-[11px] font-medium transition-colors ${
+                liveGuide?.openModalKind === 'create_version'
+                  ? 'bg-[#18181b] text-white ring-2 ring-amber-400 hover:bg-[#27272a]'
+                  : 'border border-amber-300 bg-white text-[#111827] hover:bg-amber-100/60'
+              }`}
+            >
+              <Wand2 className="h-3 w-3 text-amber-500" />
+              代填⑥ 1.0.0 版本信息
+            </button>
+          </div>
+        </div>
+
         {(liveGuide?.activeTargetHint || localTip) && (
           <div className="mt-2.5 rounded-lg border border-[#eaecef] bg-[#fafafa] px-2.5 py-1.5 text-[11px] font-medium text-[#111827]">
             {localTip || liveGuide?.activeTargetHint}
@@ -274,11 +349,12 @@ export const FeishuSetupGuide: React.FC<FeishuSetupGuideProps> = ({
                 <span className="font-semibold text-[#111827]">
                   第 1 步：扫码登录并创建「企业自建应用」
                 </span>
-                {validCliAppId ? (
-                  <span className="rounded bg-emerald-100 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-emerald-800">
-                    已识别 {validCliAppId}
-                  </span>
-                ) : (
+                <div className="flex items-center gap-1.5">
+                  {validCliAppId && (
+                    <span className="rounded bg-emerald-100 px-1.5 py-0.5 font-mono text-[10px] font-semibold text-emerald-800">
+                      当前 {validCliAppId}
+                    </span>
+                  )}
                   <button
                     type="button"
                     onClick={() => {
@@ -288,30 +364,28 @@ export const FeishuSetupGuide: React.FC<FeishuSetupGuideProps> = ({
                     className="inline-flex shrink-0 items-center gap-1 rounded-md border border-[#e4e4e7] bg-[#fafafa] px-2 py-0.5 text-[11px] font-medium text-[#111827] hover:bg-[#f1f1f3]"
                   >
                     <ExternalLink className="h-3 w-3" />
-                    刷新开放平台首页
+                    应用列表首页
                   </button>
-                )}
+                </div>
               </div>
               <ol className="mt-1.5 list-decimal space-y-1 pl-4 text-[11.5px] leading-relaxed text-[#52525b]">
                 <li>
                   用手机飞书扫码登录左侧页面，<strong>核对右上角头像旁的「企业/团队名称」与你手机飞书左上角一致</strong>（个人号可免费建一个个人测试团队，自己当管理员免审秒过）。
                 </li>
                 <li>
-                  点击左侧红色高亮的「<strong>创建企业自建应用</strong>」，填入名称与描述（可点下方一键代填），点击「<strong>创建</strong>」。
+                  点击左侧红色高亮的「<strong>创建企业自建应用</strong>」打开弹窗，点击下方「<strong>⚡ 一键代填名称描述</strong>」，再点弹窗右下角「<strong>创建</strong>」。
                 </li>
               </ol>
               {renderStepFooter(
                 1,
-                !validCliAppId ? (
-                  <button
-                    type="button"
-                    onClick={() => void handleQuickFill('app_info')}
-                    className="inline-flex items-center gap-1 rounded-md border border-[#e4e4e7] bg-white px-2 py-0.5 text-[11px] font-medium text-[#111827] hover:bg-[#f4f4f5]"
-                  >
-                    <Wand2 className="h-3 w-3 text-amber-500" />
-                    一键代填名称描述
-                  </button>
-                ) : null
+                <button
+                  type="button"
+                  onClick={() => void handleQuickFill('app_info')}
+                  className="inline-flex items-center gap-1 rounded-md bg-[#18181b] px-2.5 py-0.5 text-[11px] font-medium text-white hover:bg-[#27272a]"
+                >
+                  <Wand2 className="h-3 w-3 text-amber-400" />
+                  一键代填名称描述
+                </button>
               )}
             </div>
           </div>
@@ -348,26 +422,24 @@ export const FeishuSetupGuide: React.FC<FeishuSetupGuideProps> = ({
                 <span className="font-semibold text-[#111827]">
                   第 3 步：批量导入 7 项消息与图片文件权限
                 </span>
-                <div className="flex items-center gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => void handleQuickFill('permission_json')}
-                    className="inline-flex shrink-0 items-center gap-1 rounded-md bg-[#18181b] px-2.5 py-1 text-[11px] font-medium text-white hover:bg-[#27272a]"
-                    title="同时复制到剪贴板，并在你打开「导入权限」弹窗时直接一键写入左侧编辑器"
-                  >
-                    {copiedKey === 'json' ? (
-                      <Check className="h-3 w-3 text-emerald-400" />
-                    ) : (
-                      <Wand2 className="h-3 w-3 text-amber-400" />
-                    )}
-                    {copiedKey === 'json' ? '已复制/填入 JSON' : '复制并填入权限 JSON'}
-                  </button>
-                </div>
+                <button
+                  type="button"
+                  onClick={() => void handleQuickFill('permission_json')}
+                  className="inline-flex shrink-0 items-center gap-1 rounded-md bg-[#18181b] px-2.5 py-1 text-[11px] font-medium text-white hover:bg-[#27272a]"
+                  title="同时复制到剪贴板，并在你打开「导入权限」弹窗时直接一键写入左侧编辑器"
+                >
+                  {copiedKey === 'json' ? (
+                    <Check className="h-3 w-3 text-emerald-400" />
+                  ) : (
+                    <Wand2 className="h-3 w-3 text-amber-400" />
+                  )}
+                  {copiedKey === 'json' ? '已复制/填入 JSON' : '一键复制并填入权限 JSON'}
+                </button>
               </div>
               <ol className="mt-1.5 list-decimal space-y-1 pl-4 text-[11.5px] leading-relaxed text-[#52525b]">
                 <li>在左侧菜单点击「<strong>权限管理</strong>」→ 点击页面上的「<strong>批量导入/导出权限</strong>」。</li>
                 <li>
-                  确保切在「<strong>导入权限</strong>」标签，点击上方黑色「<strong>复制并填入权限 JSON</strong>」（或清空输入框按 <code className="rounded bg-[#f4f4f5] px-1">Ctrl+V</code> 粘贴）。
+                  切换到「<strong>导入权限</strong>」标签，点击「<strong>一键复制并填入权限 JSON</strong>」（若未自动写入，清空输入框按 <code className="rounded bg-[#f4f4f5] px-1">Ctrl+V</code> 粘贴即可）。
                 </li>
                 <li>点击弹窗右下角「<strong>下一步，确认新增权限</strong>」→「<strong>申请开通</strong>」。</li>
               </ol>
@@ -521,7 +593,7 @@ export const FeishuSetupGuide: React.FC<FeishuSetupGuideProps> = ({
               <ol className="mt-1.5 list-decimal space-y-1.5 pl-4 text-[11.5px] leading-relaxed text-[#52525b]">
                 <li>左侧点击「<strong>版本管理与发布</strong>」→「<strong>创建版本</strong>」。</li>
                 <li>
-                  填写版本号（如 <code className="rounded bg-[#f4f4f5] px-1">1.0.0</code>）与更新说明（可点下方一键代填），确认「<strong>可用范围</strong>」已包含你自己。
+                  填写版本号（如 <code className="rounded bg-[#f4f4f5] px-1">1.0.0</code>）与更新说明（可点下方「<strong>一键代填 1.0.0 版本信息</strong>」），确认「<strong>可用范围</strong>」已包含你自己。
                 </li>
                 <li>
                   先点页面底部「<strong>保存</strong>」，<strong>紧接着必须再点右上角蓝色的「申请线上发布 / 确认发布」</strong>，直到版本状态变为绿色「<strong>已发布</strong>」！
@@ -593,9 +665,9 @@ export const FeishuSetupGuide: React.FC<FeishuSetupGuideProps> = ({
                 <button
                   type="button"
                   onClick={() => void handleQuickFill('version_draft')}
-                  className="inline-flex items-center gap-1 rounded-md border border-[#e4e4e7] bg-white px-2 py-0.5 text-[11px] font-medium text-[#111827] hover:bg-[#f4f4f5]"
+                  className="inline-flex items-center gap-1 rounded-md bg-[#18181b] px-2.5 py-0.5 text-[11px] font-medium text-white hover:bg-[#27272a]"
                 >
-                  <Wand2 className="h-3 w-3 text-amber-500" />
+                  <Wand2 className="h-3 w-3 text-amber-400" />
                   一键代填 1.0.0 版本信息
                 </button>
               )}

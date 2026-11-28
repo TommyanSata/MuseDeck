@@ -193,6 +193,167 @@ export function computeSmartRoleRecommendations(
   };
 }
 
+/**
+ * Computes model-specific roleWeights & reasoningEffort when the user switches a single CLI's model
+ * and clicks the "按当前模型推荐职能" button inside the CLI configuration modal.
+ */
+export function computeSingleCliModelRecommendation(
+  cliId: string,
+  cliName: string,
+  modelId: string,
+  profile?: UserProfileConfig
+): SingleCliRecommendation {
+  const m = (modelId || '').trim().toLowerCase();
+  const profText = `${profile?.profession || ''} ${(profile?.purposes || []).join(' ')} ${profile?.customNote || ''}`.toLowerCase();
+  const isAcademic = /科研|学术|论文|高校|硕博|研究生|实验|仿真|文献|数据分析/.test(profText);
+  const isFrontend = /前端|设计|ui|ux|原型|产品/.test(profText);
+
+  // 1. Flagship Deep-Reasoning / Architecture Models (Opus, o3, gpt-5-pro, deepseek-r1, reasoner, gemini-pro/ultra)
+  if (/opus|o3(?!-mini)|gpt-5\.?[234]?-?pro|deepseek-r1|reasoner|qwq|grok-3-thinking|thinking/i.test(m)) {
+    const rw: Record<string, number> = {
+      架构规划: 5,
+      复杂重构: 5,
+      代码审查: 5,
+      核心编码: 4
+    };
+    if (isAcademic) rw['论文逻辑与难点推演'] = 5;
+    return {
+      cliId,
+      defaultModel: modelId,
+      reasoningEffort: 'high',
+      roleWeights: rw,
+      reason: `模型「${modelId}」属于深度推理旗舰档，最适合承担顶层架构设计、复杂跨模块重构与严苛代码/逻辑把关（消耗较高，不建议派发琐碎杂活）`
+    };
+  }
+
+  // 2. Fast / Lightweight / Mini / Flash / Haiku Models
+  if (/haiku|flash|mini|nano|lite|fast|turbo|8b|14b|32b/i.test(m)) {
+    const rw: Record<string, number> = {
+      文档调研: 5,
+      '修 Bug / 单测': 4,
+      核心编码: 3
+    };
+    if (isAcademic) rw['文献摘要与格式脚本'] = 5;
+    if (isFrontend) rw['前端 UI'] = 4;
+    return {
+      cliId,
+      defaultModel: modelId,
+      reasoningEffort: 'low',
+      roleWeights: rw,
+      reason: `模型「${modelId}」具备高响应速度与极低成本，适合高频文档检索、小范围报错快修、单元测试补全与批量自动化脚本`
+    };
+  }
+
+  // 3. Dedicated Coding Agent Models (codex, sonnet, qwen-coder, deepseek-v3/chat)
+  if (/codex|sonnet|coder|deepseek-chat|deepseek-v3|kimi-k2/i.test(m)) {
+    const rw: Record<string, number> = {
+      核心编码: 5,
+      '修 Bug / 单测': 5,
+      代码审查: 4,
+      复杂重构: 4
+    };
+    if (/sonnet|kimi/i.test(m) || isFrontend) {
+      rw['前端 UI'] = 5;
+    }
+    if (isAcademic) {
+      rw['数据处理与实验脚本'] = 5;
+    }
+    return {
+      cliId,
+      defaultModel: modelId,
+      reasoningEffort: /codex/i.test(m) ? 'high' : 'medium',
+      roleWeights: rw,
+      reason: `模型「${modelId}」是均衡编码主力档，代码生成准确且性价比优，适合作为日常核心功能实现、UI 组件编写与修 Bug 主力`
+    };
+  }
+
+  // 4. Long-Context Multimodal Pro Models (gemini-2.5-pro, gemini-3-pro, etc.)
+  if (/gemini.*pro/i.test(m)) {
+    const rw: Record<string, number> = {
+      文档调研: 5,
+      全栈开发: 4,
+      '前端 UI': 4,
+      架构规划: 4
+    };
+    if (isAcademic) rw['长文献与大仓库通读'] = 5;
+    return {
+      cliId,
+      defaultModel: modelId,
+      reasoningEffort: 'medium',
+      roleWeights: rw,
+      reason: `模型「${modelId}」拥有超大上下文与多模态理解力，适合大项目全局扫描、长文档调研与全栈页面生成`
+    };
+  }
+
+  // Fallback general model on this CLI
+  const basePlan = computeSmartRoleRecommendations(
+    profile || { profession: '', purposes: [] },
+    [
+      {
+        id: cliId as import('./cliScanner').DetectedCli['id'],
+        name: cliName,
+        command: cliId,
+        installHint: '',
+        installCmd: '',
+        models: [modelId],
+        apiKeyEnv: '',
+        badgeColor: '',
+        installed: true,
+        executablePath: '',
+        version: '',
+        config: {
+          enabled: true,
+          authMode: 'oauth',
+          apiKey: '',
+          baseUrl: '',
+          defaultModel: modelId,
+          extraArgs: ''
+        }
+      }
+    ]
+  );
+  const first = basePlan.recommendations[0];
+  return {
+    cliId,
+    defaultModel: modelId,
+    reasoningEffort: first?.reasoningEffort || 'medium',
+    roleWeights: first?.roleWeights || { 核心编码: 4, '修 Bug / 单测': 4, 文档调研: 3 },
+    reason: `已结合「${cliName}」与模型「${modelId || '默认'}」匹配均衡开发职能，你可在下方自由增删调整`
+  };
+}
+
+export function buildSingleCliMuseRolePrompt(
+  baseUrl: string,
+  token: string,
+  cliId: string,
+  cliName: string,
+  modelId: string,
+  profile?: UserProfileConfig
+): string {
+  return `【MuseDeck 单 CLI 模型切换 · 请为该模型推荐专属职能权重】
+用户刚刚将本地 CLI \`${cliId}\`（${cliName}）的模型切换为了：\`${modelId || '默认模型'}\`。
+用户画像：职业「${profile?.profession || '开发者/创作者'}」，主要用途「${(profile?.purposes || []).join('、') || '日常研发与自动化'}」${profile?.customNote ? `（补充：${profile.customNote}）` : ''}。
+
+请你根据 \`${modelId}\` 在业界的真实代码/推理/成本特长，立即携带 \`Authorization: Bearer ${token}\` 调用以下接口仅更新 \`${cliId}\` 的推荐职能权重与思考等级：
+\`POST ${baseUrl}/api/v1/clis/apply-recommendations\`
+Body:
+\`\`\`json
+{
+  "summary": "已针对 ${cliName} 切换的新模型 ${modelId} 更新专属职能权重（仍可随时手动微调）",
+  "recommendations": [
+    {
+      "cliId": ${JSON.stringify(cliId)},
+      "defaultModel": ${JSON.stringify(modelId)},
+      "reasoningEffort": "low | medium | high",
+      "roleWeights": { "最擅长职能1": 5, "职能2": 4 },
+      "reason": "一句话解释为什么 ${modelId} 适合这些职能"
+    }
+  ]
+}
+\`\`\`
+调用成功后简短回复一句已更新即可。`;
+}
+
 export function buildMuseRoleRecommendationPrompt(
   baseUrl: string,
   token: string,
