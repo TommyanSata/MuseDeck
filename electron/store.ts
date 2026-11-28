@@ -110,6 +110,16 @@ export interface ModelCapabilityProfile {
   updatedAt: string;
 }
 
+export interface UserProfileConfig {
+  profession: string;
+  purposes: string[];
+  customNote?: string;
+  recommendedAt?: string;
+  lastRecommendationSummary?: string;
+  lastRecommendationSource?: 'muse' | 'preset';
+  cliReasons?: Record<string, string>;
+}
+
 export interface MuseConfig {
   webUrl: string;
   autoBriefSynced: boolean;
@@ -200,6 +210,7 @@ export interface FmcState {
   onboardingCompleted: boolean;
   lastSeenAppVersion?: string;
   permissionLevel: PermissionLevel;
+  userProfile?: UserProfileConfig;
   settings: AppSettings;
   workflow: WorkflowConfig;
   feishu: FeishuConfig;
@@ -221,6 +232,10 @@ function defaultState(): FmcState {
     onboardingCompleted: false,
     lastSeenAppVersion: app.getVersion(),
     permissionLevel: 'auto',
+    userProfile: {
+      profession: '',
+      purposes: []
+    },
     settings: {
       fontSize: 'normal',
       fontFamily: 'system',
@@ -324,6 +339,11 @@ export class FmcStore {
         ...parsed,
         // Preserve parsed.lastSeenAppVersion (even if undefined on upgrade from <=0.6.1) so upgraded users see What's New once!
         lastSeenAppVersion: parsed.lastSeenAppVersion,
+        userProfile: {
+          profession: '',
+          purposes: [],
+          ...(parsed.userProfile || {})
+        },
         settings: { ...base.settings, ...(parsed.settings || {}) },
         workflow: { ...base.workflow, ...(parsed.workflow || {}) },
         feishu: { ...base.feishu, ...(parsed.feishu || {}) },

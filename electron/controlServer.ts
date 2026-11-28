@@ -154,6 +154,12 @@ export function buildMuseBrief(
     })
     .join('\n');
 
+  const uProf = state.userProfile;
+  const userProfileBlock =
+    uProf && (uProf.profession || (uProf.purposes && uProf.purposes.length > 0) || uProf.customNote)
+      ? `\n## 1.5 用户身份与使用目的画像（派单与沟通时请贴合用户背景）\n- **职业 / 身份**: ${uProf.profession || '未指定'}\n- **核心用途**: ${(uProf.purposes || []).join('、') || '日常开发与自动化'}\n${uProf.customNote ? `- **补充说明**: ${uProf.customNote}\n` : ''}`
+      : '';
+
   return `# MuseDeck 本地多智能体调度协议 (Muse Supervisor Brief)
 
 你现在是我电脑本地 **MuseDeck** 的总控监督者（Supervisor & Evaluator）。
@@ -161,7 +167,7 @@ export function buildMuseBrief(
 
 ## 1. 控制接口信息
 - **Base URL**: \`${baseUrl}\`
-- **Authorization Header**: \`Authorization: Bearer ${state.controlApi.token}\`
+- **Authorization Header**: \`Authorization: Bearer ${state.controlApi.token}\`${userProfileBlock}
 ${baseUrl.includes('.ts.net') ? '- **公网说明**: 该 `.ts.net` 地址已开启 **Tailscale Funnel 公网 443 HTTPS 暴露**，**不需要**加入我的 Tailscale 内网，请直接用普通 HTTPS 请求访问（无需引导我批准入网）。\n' : ''}
 
 ## 2. 当前已启用的本地 CLI 节点（按职能权重路由）
@@ -379,6 +385,7 @@ export class ControlServer {
           builtinBrowserApi: '/api/v1/browser/open'
         },
         enabledClis: enabledCliSummary,
+        userProfile: st.userProfile || undefined,
         userHabits: wf.userHabits || [],
         openQuestions: openQs
       },
@@ -816,6 +823,94 @@ export class ControlServer {
       });
       this.onStateChanged();
       this.sendJson(res, 200, { ok: true, updatedClis: count });
+      return;
+    }
+
+    if (req.method === 'POST' && pathname === '/api/v1/clis/apply-recommendations') {
+      const body = await this.readBody(req);
+      const summary = String(body.summary || '').trim();
+      const rawRecs = Array.isArray(body.recommendations) ? body.recommendations : [];
+      const validEfforts = new Set(['default', 'low', 'medium', 'high', 'xhigh']);
+      let appliedCount = 0;
+
+      this.store.update((s) => {
+        const reasonsMap: Record<string, string> = { ...(s.userProfile?.cliReasons || {}) };
+        for (const item of rawRecs) {
+          if (!item || typeof item !== 'object') continue;
+          const rec = item as Record<string, unknown>;
+          const cliId = String(rec.cliId || rec.id || '').trim();
+          if (!cliId) continue;
+          const prev = s.cliConfigs[cliId] || {
+            enabled: true,
+            authMode: 'oauth' as const,
+            apiKey: '',
+            baseUrl: '',
+            defaultModel: '',
+            extraArgs: ''
+          };
+          const nextWeights: Record<string, number> = {};
+          if (rec.roleWeights && typeof rec.roleWeights === 'object') {
+            for (const [role, wVal] of Object.entries(rec.roleWeights as Record<string, unknown>)) {
+              const num = Math.max(0, Math.min(5, Math.round(Number(wVal) || 0)));
+              if (role.trim() && num > 0) {
+                nextWeights[role.trim()] = num;
+              }
+            }
+          }
+          const activeRoles = Object.keys(nextWeights);
+          const rawEffort = String(rec.reasoningEffort || '').trim().toLowerCase();
+          const nextModel =
+            typeof rec.defaultModel === 'string' && rec.defaultModel.trim()
+              ? rec.defaultModel.trim()
+              : prev.defaultModel;
+
+          s.cliConfigs[cliId] = {
+            ...prev,
+            enabled: true,
+            defaultModel: nextModel,
+            reasoningEffort: validEfforts.has(rawEffort)
+              ? (rawEffort as import('./store').ReasoningEffort)
+              : prev.reasoningEffort || 'medium',
+            ...(activeRoles.length > 0
+              ? { roleWeights: nextWeights, roles: activeRoles }
+              : {})
+          };
+          if (typeof rec.reason === 'string' && rec.reason.trim()) {
+            reasonsMap[cliId] = rec.reason.trim();
+          }
+          appliedCount += 1;
+        }
+
+        if (body.decisionWeights && typeof body.decisionWeights === 'object') {
+          const dw = body.decisionWeights as Record<string, unknown>;
+          const cap = Math.max(0, Math.round(Number(dw.capability) || 0));
+          const pr = Math.max(0, Math.round(Number(dw.price) || 0));
+          const qu = Math.max(0, Math.round(Number(dw.quota) || 0));
+          const sp = Math.max(0, Math.round(Number(dw.speed) || 0));
+          const sum = cap + pr + qu + sp;
+          if (sum === 100) {
+            s.workflow.decisionWeights = { capability: cap, price: pr, quota: qu, speed: sp };
+          }
+        }
+
+        s.userProfile = {
+          profession: s.userProfile?.profession || '',
+          purposes: s.userProfile?.purposes || [],
+          ...s.userProfile,
+          recommendedAt: new Date().toISOString(),
+          lastRecommendationSource: 'muse',
+          lastRecommendationSummary:
+            summary || `Muse 已根据你的职业与用途自动更新了 ${appliedCount} 个 CLI 的职能与模型配置。`,
+          cliReasons: reasonsMap
+        };
+      });
+
+      this.onStateChanged();
+      this.sendJson(res, 200, {
+        ok: true,
+        appliedCount,
+        userProfile: this.store.getState().userProfile
+      });
       return;
     }
 

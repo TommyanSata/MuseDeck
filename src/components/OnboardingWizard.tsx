@@ -1,24 +1,30 @@
 import React, { useEffect, useState } from 'react';
 import {
+  AlertCircle,
   ArrowLeft,
   Check,
   CheckCircle2,
   ChevronRight,
+  ClipboardPaste,
   Cloud,
   Copy,
   ExternalLink,
+  Info,
   Loader2,
   Radio,
   RefreshCw,
   Send,
   ShieldCheck,
-  Sparkles
+  Sparkles,
+  UserCheck,
+  Wand2
 } from 'lucide-react';
 import {
   CliUserConfig,
   DecisionPriorityWeights,
   DetectedCli,
   FeishuAutoStepReport,
+  FeishuLiveGuideState,
   FeishuStatusEvent,
   FmcState,
   ModelRoutingMode,
@@ -28,9 +34,29 @@ import {
   TunnelStatusEvent,
   WorkflowReviewMode
 } from '../types';
+import { CliBrandIcon } from './CliBrandIcon';
 import { CliManagerView } from './CliManagerView';
 import { EmbeddedBrowserSlot } from './EmbeddedBrowserSlot';
 import { FeishuSetupGuide } from './FeishuSetupGuide';
+
+export const PROFESSION_OPTIONS = [
+  '科研人员 / 高校师生',
+  '全栈 / 独立开发者',
+  '产品经理 / 设计师',
+  '数据科学 / 量化分析',
+  '内容创作 / 运营效率',
+  '职场办公 / 自动化'
+];
+
+export const PURPOSE_OPTIONS = [
+  '核心代码开发与重构',
+  '修 Bug 与自动化测试',
+  '前端 UI 与交互原型',
+  '科研数据处理与绘图',
+  '文献与技术文档调研',
+  '脚本工具与办公自动化',
+  '手机飞书远程操控电脑'
+];
 
 interface OnboardingWizardProps {
   state: FmcState;
@@ -96,15 +122,27 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
   onComplete
 }) => {
   const [step, setStep] = useState<1 | 2 | 3 | 4 | 5>(1);
-  const [appId, setAppId] = useState(state.feishu.appId || '');
-  const [appSecret, setAppSecret] = useState(state.feishu.appSecret || '');
+
+  // Step 1: User profession & usage purpose persona states
+  const [profession, setProfession] = useState(state.userProfile?.profession || '');
+  const [purposes, setPurposes] = useState<string[]>(state.userProfile?.purposes || []);
+  const [customNote, setCustomNote] = useState(state.userProfile?.customNote || '');
+
+  // Step 2 & 3: Tunnel & Muse states
   const [museUrl, setMuseUrl] = useState(state.muse.webUrl || 'https://muse.ai');
   const [tunnelUrl, setTunnelUrl] = useState(state.controlApi.tunnelUrl || '');
   const [tunnelStatus, setTunnelStatus] = useState<TunnelStatusEvent>({ state: 'stopped' });
   const [copiedKey, setCopiedKey] = useState('');
-  const [connecting, setConnecting] = useState(false);
+  const [extStatus, setExtStatus] = useState<MuseExtensionStatus | null>(null);
+  const [extTip, setExtTip] = useState('');
+  const [testingPerm, setTestingPerm] = useState(false);
+  const [permTip, setPermTip] = useState('');
+  const [syncingAvatar, setSyncingAvatar] = useState(false);
+  const [avatarTip, setAvatarTip] = useState('');
 
-  // Step 2: Workflow & decision policy states
+  // Step 4: Muse Smart Role Recommendation & Decision Guardrails
+  const [recommendingMode, setRecommendingMode] = useState<'muse' | 'preset' | null>(null);
+  const [recommendTip, setRecommendTip] = useState('');
   const [permLevel, setPermLevel] = useState<PermissionLevel>(state.permissionLevel || 'auto');
   const [planMode, setPlanMode] = useState<PlanApprovalMode>(
     state.workflow?.planApprovalMode || 'adaptive'
@@ -130,18 +168,17 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
     state.workflow?.quietHoursEnabled !== false
   );
 
-  // Step 4 Muse pre-flight & Step 5 Privacy-Shielded Muse Feishu Co-Pilot states
+  // Step 5: Feishu Live Spotlight Guide & Credentials
+  const [appId, setAppId] = useState(state.feishu.appId || '');
+  const [appSecret, setAppSecret] = useState(state.feishu.appSecret || '');
+  const [connecting, setConnecting] = useState(false);
+  const [liveGuide, setLiveGuide] = useState<FeishuLiveGuideState | null>(null);
+  const [secretToast, setSecretToast] = useState('');
   const [botNameDraft, setBotNameDraft] = useState('MuseDeck');
   const [runningMuseCoPilot, setRunningMuseCoPilot] = useState(false);
   const [runningFeishuAuto, setRunningFeishuAuto] = useState(false);
   const [feishuAutoTip, setFeishuAutoTip] = useState('');
   const [feishuStepReport, setFeishuStepReport] = useState<FeishuAutoStepReport[]>([]);
-  const [extStatus, setExtStatus] = useState<MuseExtensionStatus | null>(null);
-  const [extTip, setExtTip] = useState('');
-  const [testingPerm, setTestingPerm] = useState(false);
-  const [permTip, setPermTip] = useState('');
-  const [syncingAvatar, setSyncingAvatar] = useState(false);
-  const [avatarTip, setAvatarTip] = useState('');
 
   useEffect(() => {
     setAppId(state.feishu.appId || '');
@@ -149,12 +186,41 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
   }, [state.feishu.appId, state.feishu.appSecret]);
 
   useEffect(() => {
+    if (state.workflow?.decisionWeights) {
+      setWeights({ ...DEFAULT_WEIGHTS, ...state.workflow.decisionWeights });
+    }
+  }, [
+    state.workflow?.decisionWeights?.capability,
+    state.workflow?.decisionWeights?.price,
+    state.workflow?.decisionWeights?.quota,
+    state.workflow?.decisionWeights?.speed
+  ]);
+
+  useEffect(() => {
     void window.fmc.getMuseExtensionStatus().then(setExtStatus);
     const offFeishuAuto = window.fmc.onEvent('autopilot:feishuProgress', (payload) => {
       const p = payload as { message?: string };
       if (p?.message) setFeishuAutoTip(p.message);
     });
-    return () => offFeishuAuto();
+    const offGuideState = window.fmc.onEvent('feishuGuide:state', (payload) => {
+      setLiveGuide(payload as FeishuLiveGuideState);
+    });
+    const offCredCap = window.fmc.onEvent('feishuGuide:credentialCaptured', (payload) => {
+      const cred = payload as { appId?: string; appSecret?: string };
+      if (cred.appId) {
+        setAppId(cred.appId);
+      }
+      if (cred.appSecret) {
+        setAppSecret(cred.appSecret);
+        setSecretToast('✨ 已自动识别填入你刚复制的 App Secret，请点击下方黑色「连接飞书长连接」按钮！');
+        setTimeout(() => setSecretToast(''), 8000);
+      }
+    });
+    return () => {
+      offFeishuAuto();
+      offGuideState();
+      offCredCap();
+    };
   }, []);
 
   useEffect(() => {
@@ -169,6 +235,10 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
     });
     return () => off();
   }, []);
+
+  const togglePurpose = (p: string) => {
+    setPurposes((prev) => (prev.includes(p) ? prev.filter((x) => x !== p) : [...prev, p]));
+  };
 
   const trimmedAppId = appId.trim();
   const trimmedAppSecret = appSecret.trim();
@@ -190,7 +260,8 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
   const feishuBotAppLink = /^cli_[a-zA-Z0-9]+$/.test(trimmedAppId)
     ? `https://applink.feishu.cn/client/bot/open?appId=${encodeURIComponent(trimmedAppId)}`
     : '';
-  const enabledCount = clis.filter((c) => c.config.enabled).length;
+  const enabledClis = clis.filter((c) => c.config.enabled);
+  const enabledCount = enabledClis.length;
   const isCustomExternalTunnel = Boolean(
     tunnelUrl.trim() &&
       !tunnelUrl.includes('.ts.net') &&
@@ -199,6 +270,7 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
   );
   const isTunnelReady = Boolean(tunnelStatus.state === 'running' || isCustomExternalTunnel);
   const isMuseVerified = Boolean(state.muse.tunnelVerified);
+  const hasProfileInfo = Boolean(profession.trim() || purposes.length > 0 || customNote.trim());
 
   const copyText = async (key: string, text: string) => {
     await navigator.clipboard.writeText(text);
@@ -206,12 +278,78 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
     setTimeout(() => setCopiedKey(''), 2000);
   };
 
+  const goStep = (next: 1 | 2 | 3 | 4 | 5) => {
+    void window.fmc.hideEmbeddedViews();
+    setStep(next);
+  };
+
+  const handleSaveStep1AndNext = async () => {
+    await window.fmc.updateUserProfile({
+      profession: profession.trim(),
+      purposes,
+      customNote: customNote.trim()
+    });
+    goStep(2);
+  };
+
+  const handleRecommendRoles = async (mode: 'muse' | 'preset') => {
+    if (recommendingMode) return;
+    setRecommendingMode(mode);
+    setRecommendTip(
+      mode === 'muse'
+        ? '正在将你的职业用途与已装 CLI 模型池发给 Muse 进行定制智能分配...'
+        : '正在结合你的职业与用途计算推荐职能分工...'
+    );
+    try {
+      const res = await window.fmc.recommendCliRoles(mode, {
+        profession: profession.trim(),
+        purposes,
+        customNote: customNote.trim()
+      });
+      setRecommendTip(res.message);
+    } finally {
+      setRecommendingMode(null);
+    }
+  };
+
+  const handleSaveStep4AndNext = async () => {
+    await window.fmc.setPermissionLevel(permLevel);
+    await window.fmc.updateWorkflowConfig({
+      planApprovalMode: planMode,
+      modelRoutingMode: routingMode,
+      reviewMode,
+      tokenBudget,
+      decisionWeights: weights,
+      cloudResearchFirst,
+      proactivePushEnabled,
+      quietHoursEnabled
+    });
+    goStep(5);
+  };
+
   const handleConnectFeishu = async () => {
     setConnecting(true);
+    setSecretToast('');
     try {
-      await window.fmc.connectFeishu(appId, appSecret);
+      await window.fmc.connectFeishu(appId.trim(), appSecret.trim());
     } finally {
       setConnecting(false);
+    }
+  };
+
+  const handlePasteCredentialFromClipboard = async () => {
+    const res = await window.fmc.readClipboardCredential();
+    if (res.appId) {
+      setAppId(res.appId);
+      setSecretToast(`已粘贴 App ID：${res.appId}，请继续在左侧点击复制 App Secret！`);
+    } else if (res.appSecret) {
+      setAppSecret(res.appSecret);
+      setSecretToast('✅ 已成功从剪贴板粘贴 App Secret！现在请点击下方「连接飞书长连接」');
+    } else if (res.raw) {
+      setAppSecret(res.raw);
+      setSecretToast('已粘贴剪贴板文本到 App Secret 输入框，请核对后点击连接');
+    } else {
+      setSecretToast('剪贴板当前为空，请先在左侧飞书「凭证与基础信息」页点击 App Secret 旁的复制图标');
     }
   };
 
@@ -224,7 +362,9 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
       const res = await window.fmc.runMuseFeishuCoPilot({
         botName: botNameDraft
       });
-      setFeishuAutoTip(res.message);
+      setFeishuAutoTip(
+        `${res.message}（若密钥未自动粘入，请记得手动在凭证页复制粘贴 App Secret 并点连接！）`
+      );
     } finally {
       setRunningMuseCoPilot(false);
     }
@@ -234,7 +374,7 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
     if (runningFeishuAuto || runningMuseCoPilot) return;
     setRunningFeishuAuto(true);
     setFeishuStepReport([]);
-    setFeishuAutoTip('正在检查左侧飞书开放平台登录态并执行本地脚本代配...');
+    setFeishuAutoTip('正在检查左侧飞书开放平台登录态并执行本地辅助代填...');
     try {
       const res = await window.fmc.runFeishuAutoPilot({
         botName: botNameDraft
@@ -275,21 +415,6 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
     if (st.url) setTunnelUrl(st.url);
   };
 
-  const handleSaveStep2AndNext = async () => {
-    await window.fmc.setPermissionLevel(permLevel);
-    await window.fmc.updateWorkflowConfig({
-      planApprovalMode: planMode,
-      modelRoutingMode: routingMode,
-      reviewMode,
-      tokenBudget,
-      decisionWeights: weights,
-      cloudResearchFirst,
-      proactivePushEnabled,
-      quietHoursEnabled
-    });
-    goStep(3);
-  };
-
   const handleTriggerPreflight = async () => {
     if (testingPerm) return;
     setTestingPerm(true);
@@ -314,18 +439,21 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
     await copyText('brief', brief);
   };
 
-  const goStep = (next: 1 | 2 | 3 | 4 | 5) => {
-    void window.fmc.hideEmbeddedViews();
-    setStep(next);
-  };
-
   const steps = [
-    { num: 1 as const, label: '本地 CLI', done: enabledCount > 0 },
-    { num: 2 as const, label: '决策与预算', done: step > 2 },
-    { num: 3 as const, label: '公网隧道', done: isTunnelReady },
-    { num: 4 as const, label: '连通 Muse', done: isMuseVerified },
+    { num: 1 as const, label: '画像与 CLI', done: enabledCount > 0 && (step > 1 || hasProfileInfo) },
+    { num: 2 as const, label: '公网隧道', done: isTunnelReady },
+    { num: 3 as const, label: '连通 Muse', done: isMuseVerified },
+    {
+      num: 4 as const,
+      label: '智能职能与策略',
+      done: Boolean(state.userProfile?.recommendedAt) || step > 4
+    },
     { num: 5 as const, label: '飞书机器人', done: isFeishuVerified }
   ];
+
+  const showMissingSecretReminder = Boolean(
+    /^cli_[a-zA-Z0-9]+$/.test(trimmedAppId) && !trimmedAppSecret
+  );
 
   return (
     <div className="flex h-screen flex-col bg-white text-[#111827] select-none">
@@ -386,368 +514,144 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
 
       {/* Main Content */}
       <div className="min-h-0 flex-1 overflow-hidden select-text">
-        {/* ================= STEP 1: LOCAL CLIs & MODEL SCANNING ================= */}
+        {/* ================= STEP 1: USER PERSONA & LOCAL CLIs ================= */}
         {step === 1 && (
-          <div className="flex h-full flex-col bg-white">
+          <div className="flex h-full flex-col bg-[#fafafa]">
             <div className="min-h-0 flex-1 overflow-y-auto px-6 py-6">
-              <div className="mx-auto max-w-[940px]">
-                <div className="mb-4">
-                  <h2 className="text-[15px] font-semibold text-[#111827]">
-                    第 1 步：选择并配置本机 AI 编程 CLI（沙箱隔离，不改本机原配置）
-                  </h2>
-                  <p className="mt-1 text-[12px] text-[#71717a]">
-                    勾选你要启用的 CLI（启用 2 个以上可在某一个额度耗尽时由 Muse 自动无缝接力！），点击卡片上的「配置」可扫描可用模型。
-                  </p>
-                </div>
-                <CliManagerView
-                  clis={clis}
-                  scanning={scanning}
-                  onRescan={onRescanClis}
-                  onSaveConfig={onSaveCliConfig}
-                  compact
-                />
+              <div className="mx-auto max-w-[940px] space-y-5">
+                {/* 1. User Profession & Purpose Card */}
+                <section className="rounded-2xl border border-[#eaecef] bg-white p-5 shadow-2xs">
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div>
+                      <h2 className="flex items-center gap-2 text-[14.5px] font-semibold text-[#111827]">
+                        <UserCheck className="h-4 w-4 text-[#18181b]" />
+                        1. 告诉我你的职业与使用目的（让 Muse 为你智能分配 CLI 职能）
+                      </h2>
+                      <p className="mt-0.5 text-[12px] text-[#71717a]">
+                        不需要懂复杂的模型参数——选好你的大概身份与用途，稍后连通 Muse 后即可一键为你匹配最优模型与职能分工（进入软件后随时可改）。
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="mt-4 space-y-3.5 text-[12.5px]">
+                    <div>
+                      <label className="mb-1.5 block text-[12px] font-medium text-[#3f3f46]">
+                        你的职业 / 身份（点选或直接输入自定义）：
+                      </label>
+                      <div className="flex flex-wrap gap-1.5">
+                        {PROFESSION_OPTIONS.map((opt) => {
+                          const active = profession === opt;
+                          return (
+                            <button
+                              key={opt}
+                              type="button"
+                              onClick={() => setProfession(opt)}
+                              className={`rounded-xl border px-3 py-1.5 text-[12px] font-medium transition-colors ${
+                                active
+                                  ? 'border-[#18181b] bg-[#18181b] text-white'
+                                  : 'border-[#e4e4e7] bg-[#fafafa] text-[#3f3f46] hover:bg-[#f4f4f5] hover:text-[#111827]'
+                              }`}
+                            >
+                              {opt}
+                            </button>
+                          );
+                        })}
+                        <input
+                          value={profession}
+                          onChange={(e) => setProfession(e.target.value)}
+                          placeholder="或输入你的具体职业，如：机械工程博士 / 量化研究员..."
+                          className="min-w-[220px] flex-1 rounded-xl border border-[#e4e4e7] bg-white px-3 py-1.5 text-[12px] text-[#111827] outline-none focus:border-[#18181b]"
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="mb-1.5 block text-[12px] font-medium text-[#3f3f46]">
+                        你使用 MuseDeck 的主要目的（可多选）：
+                      </label>
+                      <div className="flex flex-wrap gap-1.5">
+                        {PURPOSE_OPTIONS.map((p) => {
+                          const active = purposes.includes(p);
+                          return (
+                            <button
+                              key={p}
+                              type="button"
+                              onClick={() => togglePurpose(p)}
+                              className={`inline-flex items-center gap-1 rounded-xl border px-3 py-1.5 text-[12px] font-medium transition-colors ${
+                                active
+                                  ? 'border-emerald-600 bg-emerald-50 text-emerald-900'
+                                  : 'border-[#e4e4e7] bg-white text-[#52525b] hover:bg-[#fafafa] hover:text-[#111827]'
+                              }`}
+                            >
+                              {active && <Check className="h-3 w-3 text-emerald-600" />}
+                              {p}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    <div>
+                      <input
+                        value={customNote}
+                        onChange={(e) => setCustomNote(e.target.value)}
+                        placeholder="补充说明（可选）：例如「平时常用 Python 做实验数据分析绘图、写论文脚本和桌面小工具」"
+                        className="w-full rounded-xl border border-[#e4e4e7] bg-[#fafafa] px-3 py-2 text-[12px] text-[#111827] outline-none focus:border-[#18181b] focus:bg-white"
+                      />
+                    </div>
+                  </div>
+                </section>
+
+                {/* 2. Local CLI Selection */}
+                <section className="rounded-2xl border border-[#eaecef] bg-white p-5 shadow-2xs">
+                  <div className="mb-3">
+                    <h2 className="text-[14.5px] font-semibold text-[#111827]">
+                      2. 勾选你要启用的本机 AI 编程 CLI（沙箱隔离，绝不篡改本机原配置）
+                    </h2>
+                    <p className="mt-0.5 text-[12px] text-[#71717a]">
+                      建议勾选 2 个以上已安装 CLI（当某一个额度耗尽时，Muse 可在同一项目目录自动无缝换工具接力）。具体职能权重不用现在手动配，第 4 步可让 Muse 一键智能生成！
+                    </p>
+                  </div>
+                  <CliManagerView
+                    clis={clis}
+                    scanning={scanning}
+                    onRescan={onRescanClis}
+                    onSaveConfig={onSaveCliConfig}
+                    compact
+                  />
+                </section>
               </div>
             </div>
 
             <div className="flex shrink-0 items-center justify-between border-t border-[#eaecef] bg-white px-6 py-3">
               <span className="text-[12px] text-[#71717a]">
-                当前已启用 <strong className="text-[#111827]">{enabledCount}</strong> 个本地 CLI
+                已启用 <strong className="text-[#111827]">{enabledCount}</strong> 个本地 CLI
+                {profession.trim() ? (
+                  <>
+                    {' '}
+                    · 当前画像：<strong className="text-[#111827]">{profession.trim()}</strong>
+                  </>
+                ) : null}
               </span>
               <button
-                onClick={() => goStep(2)}
+                onClick={() => void handleSaveStep1AndNext()}
                 className="inline-flex items-center gap-1.5 rounded-xl bg-[#18181b] px-4 py-2 text-[12.5px] font-medium text-white transition-colors hover:bg-[#27272a]"
               >
-                下一步：决策与预算策略
+                保存画像，下一步：开启公网隧道
                 <ChevronRight className="h-3.5 w-3.5" />
               </button>
             </div>
           </div>
         )}
 
-        {/* ================= STEP 2: WORKFLOW, ROUTING & 100% PRIORITY WEIGHTS ================= */}
+        {/* ================= STEP 2: HTTPS 443 TUNNEL ================= */}
         {step === 2 && (
-          <div className="flex h-full flex-col bg-[#fafafa]">
-            <div className="min-h-0 flex-1 overflow-y-auto px-6 py-6">
-              <div className="mx-auto max-w-[820px] space-y-4 text-[12.5px]">
-                <div>
-                  <h2 className="text-[15px] font-semibold text-[#111827]">
-                    第 2 步：设定 Muse 智能决策、审批与预算护栏（进入软件后可随时在「软件设置」修改）
-                  </h2>
-                  <p className="mt-0.5 text-[12px] text-[#71717a]">
-                    决定 Muse 如何为你确认方案、如何为每个子任务挑选最划算的模型，以及单次任务的预算上限。
-                  </p>
-                </div>
-
-                {/* 1. Pre-execution approval */}
-                <section className="rounded-2xl border border-[#eaecef] bg-white p-4">
-                  <div className="font-semibold text-[#111827]">1. 执行前方案审批策略</div>
-                  <p className="mt-0.5 text-[11.5px] text-[#71717a]">
-                    每次收到新需求先确认所属项目，随后按以下策略决定是否等你批准方案再派单
-                  </p>
-                  <div className="mt-3 grid grid-cols-1 gap-2.5 sm:grid-cols-3">
-                    {(
-                      [
-                        {
-                          id: 'adaptive',
-                          title: '用户习惯（自适应·推荐）',
-                          desc: '结合任务复杂度与你沉淀的习惯自主决定先报方案还是直接做'
-                        },
-                        {
-                          id: 'always',
-                          title: '总是先报方案等批准',
-                          desc: '硬门控：每次必须经你批准分工与方案后才允许调用本地 CLI'
-                        },
-                        {
-                          id: 'never',
-                          title: '直接执行（跳过方案审批）',
-                          desc: '确认项目后直接拆单开工，适合追求全自动冲刺'
-                        }
-                      ] as const
-                    ).map((opt) => (
-                      <button
-                        key={opt.id}
-                        type="button"
-                        onClick={() => setPlanMode(opt.id)}
-                        className={`rounded-xl border p-3 text-left transition-colors ${
-                          planMode === opt.id
-                            ? 'border-[#18181b] bg-[#fafafa]'
-                            : 'border-[#eaecef] hover:bg-[#fafafa]'
-                        }`}
-                      >
-                        <div className="font-medium text-[#111827]">{opt.title}</div>
-                        <div className="mt-0.5 text-[11px] text-[#71717a]">{opt.desc}</div>
-                      </button>
-                    ))}
-                  </div>
-                </section>
-
-                {/* 2. Model & Task Routing + 100% Priority Weights */}
-                <section className="rounded-2xl border border-[#eaecef] bg-white p-4">
-                  <div className="font-semibold text-[#111827]">
-                    2. 项目模型与分工决策 + 100% 优先级权重
-                  </div>
-                  <p className="mt-0.5 text-[11.5px] text-[#71717a]">
-                    支持读取所有已开 CLI 的全量模型池与每日权威榜单，同一个 CLI 下可用不同模型处理不同子任务，且当某个 CLI 额度触顶时按此权重自动无缝换工具接力
-                  </p>
-                  <div className="mt-3 grid grid-cols-1 gap-2.5 sm:grid-cols-3">
-                    {(
-                      [
-                        {
-                          id: 'muse_ask',
-                          title: 'Muse 问询决策（推荐）',
-                          desc: '对比【你的默认配置】与【Muse 性价比推荐配置】请你二选一'
-                        },
-                        {
-                          id: 'muse_auto',
-                          title: 'Muse 智能决策',
-                          desc: '按子任务专长与下方权重自动匹配最优 CLI + 模型 + 思考等级'
-                        },
-                        {
-                          id: 'user_default',
-                          title: '用户默认设定',
-                          desc: '严格固定使用你在 CLI 管理里设置的默认模型与思考等级'
-                        }
-                      ] as const
-                    ).map((opt) => (
-                      <button
-                        key={opt.id}
-                        type="button"
-                        onClick={() => setRoutingMode(opt.id)}
-                        className={`rounded-xl border p-3 text-left transition-colors ${
-                          routingMode === opt.id
-                            ? 'border-[#18181b] bg-[#fafafa]'
-                            : 'border-[#eaecef] hover:bg-[#fafafa]'
-                        }`}
-                      >
-                        <div className="font-medium text-[#111827]">{opt.title}</div>
-                        <div className="mt-0.5 text-[11px] text-[#71717a]">{opt.desc}</div>
-                      </button>
-                    ))}
-                  </div>
-
-                  {/* 100% Priority Sliders */}
-                  <div className="mt-3.5 rounded-xl border border-[#eaecef] bg-[#fafafa] p-3">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <span className="text-[12px] font-medium text-[#111827]">
-                        决策优先级配比（总计{' '}
-                        <span className="font-mono text-emerald-700">
-                          {weights.capability + weights.price + weights.quota + weights.speed}%
-                        </span>
-                        ）
-                      </span>
-                      <div className="flex gap-1">
-                        {[
-                          { label: '均衡推荐', w: { capability: 45, price: 25, quota: 20, speed: 10 } },
-                          { label: '质量优先', w: { capability: 65, price: 10, quota: 15, speed: 10 } },
-                          { label: '极致省钱', w: { capability: 25, price: 40, quota: 25, speed: 10 } }
-                        ].map((p) => (
-                          <button
-                            key={p.label}
-                            type="button"
-                            onClick={() => setWeights(p.w)}
-                            className="rounded-md border border-[#e4e4e7] bg-white px-2 py-0.5 text-[10.5px] font-medium text-[#52525b] hover:border-[#18181b] hover:text-[#111827]"
-                          >
-                            {p.label}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                    <div className="mt-2.5 grid grid-cols-2 gap-2 sm:grid-cols-4">
-                      {(
-                        [
-                          { key: 'capability', label: '模型能力' },
-                          { key: 'price', label: '价格性价比' },
-                          { key: 'quota', label: '剩余额度/限额' },
-                          { key: 'speed', label: '响应速度' }
-                        ] as const
-                      ).map((it) => (
-                        <div
-                          key={it.key}
-                          className="rounded-lg border border-[#eaecef] bg-white px-2.5 py-2"
-                        >
-                          <div className="flex items-center justify-between text-[11.5px]">
-                            <span className="font-medium text-[#3f3f46]">{it.label}</span>
-                            <span className="font-mono font-semibold text-[#111827]">
-                              {weights[it.key]}%
-                            </span>
-                          </div>
-                          <input
-                            type="range"
-                            min={0}
-                            max={100}
-                            step={1}
-                            value={weights[it.key]}
-                            onChange={(e) =>
-                              setWeights(
-                                rebalanceWeights(weights, it.key, Number.parseInt(e.target.value, 10))
-                              )
-                            }
-                            className="mt-1 h-1.5 w-full cursor-pointer accent-[#18181b]"
-                          />
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                </section>
-
-                {/* 3. Review Mode, Permission Level & Token Budget */}
-                <section className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                  <div className="rounded-2xl border border-[#eaecef] bg-white p-4">
-                    <div className="font-semibold text-[#111827]">3. 本地 CLI 执行权限等级</div>
-                    <div className="mt-2.5 grid grid-cols-2 gap-1.5">
-                      {(
-                        [
-                          { id: 'auto', label: '自动编辑（推荐）' },
-                          { id: 'turbo', label: 'Turbo 全放行' },
-                          { id: 'default', label: '默认安全确认' },
-                          { id: 'ask_review', label: '只读规划模式' }
-                        ] as const
-                      ).map((p) => (
-                        <button
-                          key={p.id}
-                          type="button"
-                          onClick={() => setPermLevel(p.id)}
-                          className={`rounded-xl border px-2.5 py-2 text-[11.5px] font-medium transition-colors ${
-                            permLevel === p.id
-                              ? 'border-[#18181b] bg-[#18181b] text-white'
-                              : 'border-[#eaecef] bg-[#fafafa] text-[#3f3f46] hover:bg-[#f4f4f5]'
-                          }`}
-                        >
-                          {p.label}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-
-                  <div className="rounded-2xl border border-[#eaecef] bg-white p-4">
-                    <div className="font-semibold text-[#111827]">4. 完工审阅与单次预算护栏</div>
-                    <div className="mt-2 flex flex-wrap gap-1.5">
-                      {(
-                        [
-                          { id: 'muse_review', label: 'Muse 先审阅再问我' },
-                          { id: 'direct_user', label: '跑完直接问我' },
-                          { id: 'auto_sprint', label: '自动闭环冲刺' }
-                        ] as const
-                      ).map((r) => (
-                        <button
-                          key={r.id}
-                          type="button"
-                          onClick={() => setReviewMode(r.id)}
-                          className={`rounded-lg border px-2.5 py-1 text-[11px] font-medium ${
-                            reviewMode === r.id
-                              ? 'border-[#18181b] bg-[#fafafa] text-[#111827]'
-                              : 'border-[#eaecef] text-[#71717a]'
-                          }`}
-                        >
-                          {r.label}
-                        </button>
-                      ))}
-                    </div>
-                    <div className="mt-2.5 flex items-center justify-between gap-2">
-                      <span className="text-[11.5px] text-[#71717a]">单需求预算上限：</span>
-                      <div className="flex rounded-lg bg-[#f4f4f5] p-0.5">
-                        {[
-                          { v: 50000, l: '50k' },
-                          { v: 150000, l: '150k' },
-                          { v: 300000, l: '300k' },
-                          { v: 0, l: '不限' }
-                        ].map((b) => (
-                          <button
-                            key={b.v}
-                            type="button"
-                            onClick={() => setTokenBudget(b.v)}
-                            className={`rounded-md px-2 py-0.5 font-mono text-[11px] font-medium ${
-                              tokenBudget === b.v ? 'bg-white text-[#111827] shadow-2xs' : 'text-[#71717a]'
-                            }`}
-                          >
-                            {b.l}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-                </section>
-
-                {/* 5. Cloud Scout & Proactive Muse Superpowers */}
-                <section className="rounded-2xl border border-[#eaecef] bg-white p-4">
-                  <div className="font-semibold text-[#111827]">
-                    5. Muse 云端探路与主动思考推送（推荐全开）
-                  </div>
-                  <div className="mt-2.5 grid grid-cols-1 gap-2.5 sm:grid-cols-2">
-                    <label className="flex cursor-pointer items-start gap-2.5 rounded-xl border border-[#eaecef] bg-[#fafafa] p-3">
-                      <input
-                        type="checkbox"
-                        checked={cloudResearchFirst}
-                        onChange={(e) => setCloudResearchFirst(e.target.checked)}
-                        className="mt-0.5 accent-[#18181b]"
-                      />
-                      <div>
-                        <div className="font-medium text-[#111827]">云端探路 + 本地施工协同</div>
-                        <div className="mt-0.5 text-[11px] leading-relaxed text-[#71717a]">
-                          联网搜索、查最新文档与云端网页操作直接由 Muse 完成（零本地 CLI 额度消耗），情报自动落盘供本地 CLI 施工。
-                        </div>
-                      </div>
-                    </label>
-
-                    <div className="rounded-xl border border-[#eaecef] bg-[#fafafa] p-3">
-                      <label className="flex cursor-pointer items-start gap-2.5">
-                        <input
-                          type="checkbox"
-                          checked={proactivePushEnabled}
-                          onChange={(e) => setProactivePushEnabled(e.target.checked)}
-                          className="mt-0.5 accent-[#18181b]"
-                        />
-                        <div>
-                          <div className="font-medium text-[#111827]">主动思考实时推送飞书与桌面</div>
-                          <div className="mt-0.5 text-[11px] leading-relaxed text-[#71717a]">
-                            自动记录未定论议题；当 Muse 不定时主动追问时实时推送到手机飞书与桌面通知。
-                          </div>
-                        </div>
-                      </label>
-                      {proactivePushEnabled && (
-                        <label className="mt-2 inline-flex cursor-pointer items-center gap-1.5 pl-6 text-[11px] font-medium text-[#52525b]">
-                          <input
-                            type="checkbox"
-                            checked={quietHoursEnabled}
-                            onChange={(e) => setQuietHoursEnabled(e.target.checked)}
-                            className="accent-[#18181b]"
-                          />
-                          开启夜间免打扰（23:00–08:00 静音不推飞书，可在设置调整时段）
-                        </label>
-                      )}
-                    </div>
-                  </div>
-                </section>
-              </div>
-            </div>
-
-            <div className="flex shrink-0 items-center justify-between border-t border-[#eaecef] bg-white px-6 py-3">
-              <button
-                onClick={() => goStep(1)}
-                className="inline-flex items-center gap-1.5 rounded-xl border border-[#e4e4e7] bg-white px-3.5 py-2 text-[12.5px] font-medium text-[#52525b] hover:bg-[#f4f4f5]"
-              >
-                <ArrowLeft className="h-3.5 w-3.5" />
-                上一步
-              </button>
-              <button
-                onClick={() => void handleSaveStep2AndNext()}
-                className="inline-flex items-center gap-1.5 rounded-xl bg-[#18181b] px-4 py-2 text-[12.5px] font-medium text-white hover:bg-[#27272a]"
-              >
-                保存策略，下一步：开启公网隧道
-                <ChevronRight className="h-3.5 w-3.5" />
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* ================= STEP 3: HTTPS 443 TUNNEL ================= */}
-        {step === 3 && (
           <div className="flex h-full flex-col bg-[#fafafa]">
             <div className="min-h-0 flex-1 overflow-y-auto px-6 py-6">
               <div className="mx-auto max-w-[740px] space-y-4 text-[12.5px]">
                 <div>
                   <h2 className="text-[15px] font-semibold text-[#111827]">
-                    第 3 步：开启 443 HTTPS 公网穿透（让云端 Meta Muse 能访问你的本机接口）
+                    第 2 步：开启 443 HTTPS 公网穿透（让云端 Meta Muse 能访问你的本机接口）
                   </h2>
                   <p className="mt-0.5 text-[12px] text-[#71717a]">
                     推荐使用内置的 <strong>Tailscale Funnel</strong>：无需安装客户端、无需云服务器，完成一次免费网页授权即可获得<strong>永久不变的 .ts.net 域名</strong>。
@@ -883,7 +787,7 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
                       <strong>MagicDNS</strong> 与 <strong>Enable HTTPS</strong> 即可。
                     </li>
                     <li>
-                      <strong>自动回填并关闭窗口：</strong>授权通过后约 3~8 秒自动获取专属 <code className="rounded bg-[#f4f4f5] px-1">.ts.net</code> 永久域名并自动关闭小窗。
+                      <strong>自动预热证书并回填：</strong>授权通过后自动完成 Let’s Encrypt 证书预签发并关闭小窗。
                     </li>
                   </ol>
                 </section>
@@ -892,31 +796,31 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
 
             <div className="flex shrink-0 items-center justify-between border-t border-[#eaecef] bg-white px-6 py-3">
               <button
-                onClick={() => goStep(2)}
+                onClick={() => goStep(1)}
                 className="inline-flex items-center gap-1.5 rounded-xl border border-[#e4e4e7] bg-white px-3.5 py-2 text-[12.5px] font-medium text-[#52525b] hover:bg-[#f4f4f5]"
               >
                 <ArrowLeft className="h-3.5 w-3.5" />
                 上一步
               </button>
               <button
-                onClick={() => goStep(4)}
+                onClick={() => goStep(3)}
                 className="inline-flex items-center gap-1.5 rounded-xl bg-[#18181b] px-4 py-2 text-[12.5px] font-medium text-white hover:bg-[#27272a]"
               >
-                下一步：登录 Muse 并授权站点权限
+                下一步：登录并连通 Muse
                 <ChevronRight className="h-3.5 w-3.5" />
               </button>
             </div>
           </div>
         )}
 
-        {/* ================= STEP 4: MUSE LOGIN & SITE PERMISSION PRE-FLIGHT ================= */}
-        {step === 4 && (
+        {/* ================= STEP 3: MUSE LOGIN & SITE PERMISSION PRE-FLIGHT ================= */}
+        {step === 3 && (
           <div className="grid h-full grid-cols-12">
             <div className="col-span-7 h-full border-r border-[#eaecef]">
               <EmbeddedBrowserSlot
                 target="muse"
                 initialUrl={museUrl}
-                visible={step === 4}
+                visible={step === 3}
                 presets={[
                   { label: 'Meta Muse', url: 'https://muse.ai' },
                   { label: '飞书网页版', url: 'https://www.feishu.cn/messenger/' }
@@ -978,7 +882,7 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
                   <div className="flex items-center justify-between gap-2">
                     <h2 className="flex items-center gap-1.5 text-[13.5px] font-semibold text-[#111827]">
                       <ShieldCheck className="h-4 w-4 text-[#18181b]" />
-                      2. 发送协议并提前授权「总是允许此站点」（关键！）
+                      2. 发送协议并授权「总是允许此站点」（关键！）
                     </h2>
                     {isMuseVerified && (
                       <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10.5px] font-semibold text-emerald-800">
@@ -987,7 +891,7 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
                     )}
                   </div>
                   <p className="mt-1 text-[11.5px] leading-relaxed text-[#52525b]">
-                    先在这里完成一次性站点授权握手，下一步即可直接让上岗的 Muse 帮你智能接管配置飞书机器人！
+                    完成这次站点授权后，下一步即可让 Muse 根据你的<strong>职业与使用目的</strong>智能推荐各 CLI 职能分工！
                   </p>
 
                   <ol className="mt-2.5 list-decimal space-y-1.5 pl-4 text-[11.5px] text-[#3f3f46]">
@@ -1053,7 +957,7 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
                       <div className="flex items-center gap-1.5 font-medium">
                         <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-600" />
                         <span>
-                          双向握手验证成功！Muse 已正式打通本机接口，现在点「下一步」即可让 Muse 接管配置你的飞书机器人！
+                          双向握手验证成功！现在点「下一步」即可让已连线的 Muse 为你智能定制 CLI 职能配置！
                         </span>
                       </div>
                     ) : (
@@ -1067,7 +971,7 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
                 <section className="rounded-2xl border border-[#eaecef] bg-white p-4">
                   <div className="flex items-center justify-between gap-2">
                     <h2 className="text-[13px] font-semibold text-[#111827]">
-                      3. 本地真实 IP 浏览器联动（防云端 IP 风控 · 可选增强）
+                      3. 本地真实 IP 浏览器联动（可选增强）
                     </h2>
                     <span
                       className={`rounded-full px-2 py-0.5 text-[10.5px] font-semibold ${
@@ -1082,9 +986,7 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
                     </span>
                   </div>
                   <p className="mt-1 text-[11px] leading-relaxed text-[#52525b]">
-                    {extStatus?.installed
-                      ? `已检测到你本机 ${extStatus.browser === 'edge' ? 'Edge' : 'Chrome'} 安装了官方「Muse from Meta」插件！同时 MuseDeck 已内置隐私脱敏受控浏览器双保险。`
-                      : 'MuseDeck 已内置本地 IP 隐私脱敏受控浏览器供 Muse 调用；你也可在本机 Chrome 安装官方「Muse from Meta」扩展。'}
+                    MuseDeck 已内置本地受控浏览器供 Muse 调用；你也可在 Chrome 安装官方「Muse from Meta」扩展防云端机房 IP 风控。
                   </p>
                   <div className="mt-2.5 flex flex-wrap gap-2">
                     <button
@@ -1113,17 +1015,17 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
 
               <div className="flex shrink-0 items-center justify-between border-t border-[#eaecef] bg-white px-5 py-3">
                 <button
-                  onClick={() => goStep(3)}
+                  onClick={() => goStep(2)}
                   className="inline-flex items-center gap-1.5 rounded-xl border border-[#e4e4e7] bg-white px-3.5 py-2 text-[12.5px] font-medium text-[#52525b] hover:bg-[#f4f4f5]"
                 >
                   <ArrowLeft className="h-3.5 w-3.5" />
                   上一步
                 </button>
                 <button
-                  onClick={() => goStep(5)}
+                  onClick={() => goStep(4)}
                   className="inline-flex items-center gap-1.5 rounded-xl bg-[#18181b] px-4 py-2 text-[12.5px] font-medium text-white hover:bg-[#27272a]"
                 >
-                  下一步：配置飞书机器人（支持 Muse 接管）
+                  下一步：Muse 智能职能推荐与策略
                   <ChevronRight className="h-3.5 w-3.5" />
                 </button>
               </div>
@@ -1131,7 +1033,427 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
           </div>
         )}
 
-        {/* ================= STEP 5: FEISHU BOT (PRIVACY-SHIELDED MUSE CO-PILOT) ================= */}
+        {/* ================= STEP 4: MUSE SMART ROLE RECOMMENDATION & WORKFLOW POLICY ================= */}
+        {step === 4 && (
+          <div className="flex h-full flex-col bg-[#fafafa]">
+            <div className="min-h-0 flex-1 overflow-y-auto px-6 py-6">
+              <div className="mx-auto max-w-[860px] space-y-4 text-[12.5px]">
+                <div>
+                  <h2 className="text-[15px] font-semibold text-[#111827]">
+                    第 4 步：Muse 智能职能分工推荐 & 审批预算护栏
+                  </h2>
+                  <p className="mt-0.5 text-[12px] text-[#71717a]">
+                    根据你在第 1 步填写的职业与用途，为每个已启用 CLI 推荐最擅长的职能、默认模型与思考等级。
+                  </p>
+                </div>
+
+                {/* HERO: Muse Smart CLI Role Recommendation */}
+                <section className="rounded-2xl border-2 border-[#18181b] bg-white p-5 shadow-2xs">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <Sparkles className="h-4 w-4 text-amber-500" />
+                        <h3 className="text-[14px] font-semibold text-[#111827]">
+                          结合你的画像智能分配 CLI 模型职能
+                        </h3>
+                        {state.userProfile?.recommendedAt && (
+                          <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10.5px] font-semibold text-emerald-800">
+                            {state.userProfile.lastRecommendationSource === 'muse'
+                              ? 'Muse 已定制'
+                              : '已套用智能推荐'}
+                          </span>
+                        )}
+                      </div>
+                      <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11.5px] text-[#52525b]">
+                        <span>
+                          当前画像：
+                          <strong className="text-[#111827]">
+                            {profession.trim() || '通用创作者 / 开发者'}
+                          </strong>
+                          {purposes.length > 0 ? ` · ${purposes.join(' / ')}` : ''}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => goStep(1)}
+                          className="rounded-md bg-[#f4f4f5] px-1.5 py-0.5 text-[11px] font-medium text-[#111827] hover:bg-[#e4e4e7]"
+                        >
+                          修改画像
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        disabled={Boolean(recommendingMode)}
+                        onClick={() => void handleRecommendRoles('muse')}
+                        className="inline-flex items-center gap-1.5 rounded-xl bg-[#18181b] px-3.5 py-2 text-[12px] font-medium text-white transition-colors hover:bg-[#27272a] disabled:opacity-50"
+                      >
+                        {recommendingMode === 'muse' ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : (
+                          <Sparkles className="h-3.5 w-3.5 text-amber-400" />
+                        )}
+                        让 Muse 智能推荐并配置
+                      </button>
+                      <button
+                        type="button"
+                        disabled={Boolean(recommendingMode)}
+                        onClick={() => void handleRecommendRoles('preset')}
+                        className="inline-flex items-center gap-1.5 rounded-xl border border-[#e4e4e7] bg-[#fafafa] px-3 py-2 text-[12px] font-medium text-[#111827] transition-colors hover:bg-[#f4f4f5] disabled:opacity-50"
+                        title="无需等待网络，0.1 秒按你的职业画像生成推荐分工"
+                      >
+                        <Wand2 className="h-3.5 w-3.5 text-amber-500" />
+                        秒级套用场景预设推荐
+                      </button>
+                    </div>
+                  </div>
+
+                  {(recommendTip || state.userProfile?.lastRecommendationSummary) && (
+                    <div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50/70 px-3.5 py-2.5 text-[11.5px] leading-relaxed text-emerald-950">
+                      {state.userProfile?.lastRecommendationSummary || recommendTip}
+                    </div>
+                  )}
+
+                  {/* Live Assigned Roles Preview across Enabled CLIs */}
+                  <div className="mt-3.5 space-y-2">
+                    {enabledClis.length === 0 ? (
+                      <div className="rounded-xl border border-dashed border-[#d4d4d8] p-4 text-center text-[12px] text-[#71717a]">
+                        尚未勾选启用的 CLI，可返回第 1 步开启后再进行智能职能分配。
+                      </div>
+                    ) : (
+                      enabledClis.map((c) => {
+                        const rw = c.config.roleWeights || {};
+                        const activeEntries = Object.entries(rw)
+                          .filter(([, w]) => w > 0)
+                          .sort((a, b) => b[1] - a[1]);
+                        const fallbackRoles = c.config.roles || [];
+                        const reason = state.userProfile?.cliReasons?.[c.id];
+                        return (
+                          <div
+                            key={c.id}
+                            className="flex flex-col gap-1.5 rounded-xl border border-[#eaecef] bg-[#fafafa] px-3.5 py-2.5"
+                          >
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <div className="flex items-center gap-2">
+                                <CliBrandIcon
+                                  cliId={c.id}
+                                  avatarUrl={c.config.avatarUrl}
+                                  className="h-4 w-4"
+                                />
+                                <span className="font-semibold text-[#111827]">{c.name}</span>
+                                <span className="rounded bg-white px-1.5 py-0.5 font-mono text-[11px] text-[#52525b] ring-1 ring-[#e4e4e7]">
+                                  {c.config.defaultModel || c.models[0] || '默认模型'}
+                                </span>
+                                <span className="rounded bg-[#e4e4e7]/70 px-1.5 py-0.5 font-mono text-[10.5px] text-[#3f3f46]">
+                                  思考：{c.config.reasoningEffort || 'default'}
+                                </span>
+                              </div>
+                              <div className="flex flex-wrap gap-1">
+                                {activeEntries.length > 0
+                                  ? activeEntries.map(([r, w]) => (
+                                      <span
+                                        key={r}
+                                        className="rounded-md bg-[#18181b] px-2 py-0.5 text-[10.5px] font-medium text-white"
+                                      >
+                                        {r} {w}/5
+                                      </span>
+                                    ))
+                                  : fallbackRoles.map((r) => (
+                                      <span
+                                        key={r}
+                                        className="rounded-md bg-[#18181b] px-2 py-0.5 text-[10.5px] font-medium text-white"
+                                      >
+                                        {r}
+                                      </span>
+                                    ))}
+                              </div>
+                            </div>
+                            {reason && (
+                              <div className="text-[11px] text-[#52525b]">💡 推荐理由：{reason}</div>
+                            )}
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+
+                  {/* Friendly Reminder that User Can Modify Anytime Later */}
+                  <div className="mt-3 flex items-start gap-2 rounded-xl bg-[#f4f4f5] px-3 py-2 text-[11.5px] text-[#3f3f46]">
+                    <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[#18181b]" />
+                    <span>
+                      <strong>随时可自行修改：</strong>以上智能职能推荐仅帮你免去首次逐一配置的繁琐。进入 MuseDeck 后，你随时可在左侧菜单{' '}
+                      <strong>「应用 / CLI 雷达 → 配置」</strong> 或 <strong>「软件设置」</strong> 中手动增删职能标签、调节 0–5 权重、更换默认模型。
+                    </span>
+                  </div>
+                </section>
+
+                {/* 1. Pre-execution approval */}
+                <section className="rounded-2xl border border-[#eaecef] bg-white p-4">
+                  <div className="font-semibold text-[#111827]">1. 执行前方案审批策略</div>
+                  <div className="mt-2.5 grid grid-cols-1 gap-2.5 sm:grid-cols-3">
+                    {(
+                      [
+                        {
+                          id: 'adaptive',
+                          title: '用户习惯（自适应·推荐）',
+                          desc: '结合任务复杂度与你沉淀的习惯自主决定先报方案还是直接做'
+                        },
+                        {
+                          id: 'always',
+                          title: '总是先报方案等批准',
+                          desc: '硬门控：每次必须经你批准分工与方案后才允许调用本地 CLI'
+                        },
+                        {
+                          id: 'never',
+                          title: '直接执行（跳过方案审批）',
+                          desc: '确认项目后直接拆单开工，适合追求全自动冲刺'
+                        }
+                      ] as const
+                    ).map((opt) => (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() => setPlanMode(opt.id)}
+                        className={`rounded-xl border p-3 text-left transition-colors ${
+                          planMode === opt.id
+                            ? 'border-[#18181b] bg-[#fafafa]'
+                            : 'border-[#eaecef] hover:bg-[#fafafa]'
+                        }`}
+                      >
+                        <div className="font-medium text-[#111827]">{opt.title}</div>
+                        <div className="mt-0.5 text-[11px] text-[#71717a]">{opt.desc}</div>
+                      </button>
+                    ))}
+                  </div>
+                </section>
+
+                {/* 2. Model & Task Routing + 100% Priority Weights */}
+                <section className="rounded-2xl border border-[#eaecef] bg-white p-4">
+                  <div className="font-semibold text-[#111827]">
+                    2. 项目模型决策模式 + 100% 优先级权重
+                  </div>
+                  <div className="mt-2.5 grid grid-cols-1 gap-2.5 sm:grid-cols-3">
+                    {(
+                      [
+                        {
+                          id: 'muse_ask',
+                          title: 'Muse 问询决策（推荐）',
+                          desc: '对比【你的默认配置】与【Muse 性价比推荐配置】请你二选一'
+                        },
+                        {
+                          id: 'muse_auto',
+                          title: 'Muse 智能决策',
+                          desc: '按子任务专长与下方权重自动匹配最优 CLI + 模型 + 思考等级'
+                        },
+                        {
+                          id: 'user_default',
+                          title: '用户默认设定',
+                          desc: '严格固定使用你在 CLI 管理里设置的默认模型与思考等级'
+                        }
+                      ] as const
+                    ).map((opt) => (
+                      <button
+                        key={opt.id}
+                        type="button"
+                        onClick={() => setRoutingMode(opt.id)}
+                        className={`rounded-xl border p-3 text-left transition-colors ${
+                          routingMode === opt.id
+                            ? 'border-[#18181b] bg-[#fafafa]'
+                            : 'border-[#eaecef] hover:bg-[#fafafa]'
+                        }`}
+                      >
+                        <div className="font-medium text-[#111827]">{opt.title}</div>
+                        <div className="mt-0.5 text-[11px] text-[#71717a]">{opt.desc}</div>
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* 100% Priority Sliders */}
+                  <div className="mt-3 rounded-xl border border-[#eaecef] bg-[#fafafa] p-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-[12px] font-medium text-[#111827]">
+                        决策优先级配比（总计{' '}
+                        <span className="font-mono text-emerald-700">
+                          {weights.capability + weights.price + weights.quota + weights.speed}%
+                        </span>
+                        ）
+                      </span>
+                      <div className="flex gap-1">
+                        {[
+                          { label: '均衡推荐', w: { capability: 45, price: 25, quota: 20, speed: 10 } },
+                          { label: '质量优先', w: { capability: 65, price: 10, quota: 15, speed: 10 } },
+                          { label: '极致省钱', w: { capability: 25, price: 40, quota: 25, speed: 10 } }
+                        ].map((p) => (
+                          <button
+                            key={p.label}
+                            type="button"
+                            onClick={() => setWeights(p.w)}
+                            className="rounded-md border border-[#e4e4e7] bg-white px-2 py-0.5 text-[10.5px] font-medium text-[#52525b] hover:border-[#18181b] hover:text-[#111827]"
+                          >
+                            {p.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="mt-2.5 grid grid-cols-2 gap-2 sm:grid-cols-4">
+                      {(
+                        [
+                          { key: 'capability', label: '模型能力' },
+                          { key: 'price', label: '价格性价比' },
+                          { key: 'quota', label: '剩余额度/限额' },
+                          { key: 'speed', label: '响应速度' }
+                        ] as const
+                      ).map((it) => (
+                        <div
+                          key={it.key}
+                          className="rounded-lg border border-[#eaecef] bg-white px-2.5 py-2"
+                        >
+                          <div className="flex items-center justify-between text-[11.5px]">
+                            <span className="font-medium text-[#3f3f46]">{it.label}</span>
+                            <span className="font-mono font-semibold text-[#111827]">
+                              {weights[it.key]}%
+                            </span>
+                          </div>
+                          <input
+                            type="range"
+                            min={0}
+                            max={100}
+                            step={1}
+                            value={weights[it.key]}
+                            onChange={(e) =>
+                              setWeights(
+                                rebalanceWeights(weights, it.key, Number.parseInt(e.target.value, 10))
+                              )
+                            }
+                            className="mt-1 h-1.5 w-full cursor-pointer accent-[#18181b]"
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </section>
+
+                {/* 3. Review Mode, Permission Level & Token Budget + Superpowers */}
+                <section className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  <div className="rounded-2xl border border-[#eaecef] bg-white p-4">
+                    <div className="font-semibold text-[#111827]">3. 本地 CLI 执行权限等级</div>
+                    <div className="mt-2.5 grid grid-cols-2 gap-1.5">
+                      {(
+                        [
+                          { id: 'auto', label: '自动编辑（推荐）' },
+                          { id: 'turbo', label: 'Turbo 全放行' },
+                          { id: 'default', label: '默认安全确认' },
+                          { id: 'ask_review', label: '只读规划模式' }
+                        ] as const
+                      ).map((p) => (
+                        <button
+                          key={p.id}
+                          type="button"
+                          onClick={() => setPermLevel(p.id)}
+                          className={`rounded-xl border px-2.5 py-2 text-[11.5px] font-medium transition-colors ${
+                            permLevel === p.id
+                              ? 'border-[#18181b] bg-[#18181b] text-white'
+                              : 'border-[#eaecef] bg-[#fafafa] text-[#3f3f46] hover:bg-[#f4f4f5]'
+                          }`}
+                        >
+                          {p.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border border-[#eaecef] bg-white p-4">
+                    <div className="font-semibold text-[#111827]">4. 完工审阅与单次预算护栏</div>
+                    <div className="mt-2 flex flex-wrap gap-1.5">
+                      {(
+                        [
+                          { id: 'muse_review', label: 'Muse 先审阅再问我' },
+                          { id: 'direct_user', label: '跑完直接问我' },
+                          { id: 'auto_sprint', label: '自动闭环冲刺' }
+                        ] as const
+                      ).map((r) => (
+                        <button
+                          key={r.id}
+                          type="button"
+                          onClick={() => setReviewMode(r.id)}
+                          className={`rounded-lg border px-2.5 py-1 text-[11px] font-medium ${
+                            reviewMode === r.id
+                              ? 'border-[#18181b] bg-[#fafafa] text-[#111827]'
+                              : 'border-[#eaecef] text-[#71717a]'
+                          }`}
+                        >
+                          {r.label}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="mt-2.5 flex items-center justify-between gap-2">
+                      <span className="text-[11.5px] text-[#71717a]">单需求预算上限：</span>
+                      <div className="flex rounded-lg bg-[#f4f4f5] p-0.5">
+                        {[
+                          { v: 50000, l: '50k' },
+                          { v: 150000, l: '150k' },
+                          { v: 300000, l: '300k' },
+                          { v: 0, l: '不限' }
+                        ].map((b) => (
+                          <button
+                            key={b.v}
+                            type="button"
+                            onClick={() => setTokenBudget(b.v)}
+                            className={`rounded-md px-2 py-0.5 font-mono text-[11px] font-medium ${
+                              tokenBudget === b.v ? 'bg-white text-[#111827] shadow-2xs' : 'text-[#71717a]'
+                            }`}
+                          >
+                            {b.l}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                    <div className="mt-2.5 flex flex-wrap gap-3 border-t border-[#f1f1f3] pt-2 text-[11px] text-[#52525b]">
+                      <label className="inline-flex cursor-pointer items-center gap-1.5">
+                        <input
+                          type="checkbox"
+                          checked={cloudResearchFirst}
+                          onChange={(e) => setCloudResearchFirst(e.target.checked)}
+                          className="accent-[#18181b]"
+                        />
+                        云端探路省本地额度
+                      </label>
+                      <label className="inline-flex cursor-pointer items-center gap-1.5">
+                        <input
+                          type="checkbox"
+                          checked={proactivePushEnabled}
+                          onChange={(e) => setProactivePushEnabled(e.target.checked)}
+                          className="accent-[#18181b]"
+                        />
+                        主动思考推送飞书
+                      </label>
+                    </div>
+                  </div>
+                </section>
+              </div>
+            </div>
+
+            <div className="flex shrink-0 items-center justify-between border-t border-[#eaecef] bg-white px-6 py-3">
+              <button
+                onClick={() => goStep(3)}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-[#e4e4e7] bg-white px-3.5 py-2 text-[12.5px] font-medium text-[#52525b] hover:bg-[#f4f4f5]"
+              >
+                <ArrowLeft className="h-3.5 w-3.5" />
+                上一步
+              </button>
+              <button
+                onClick={() => void handleSaveStep4AndNext()}
+                className="inline-flex items-center gap-1.5 rounded-xl bg-[#18181b] px-4 py-2 text-[12.5px] font-medium text-white hover:bg-[#27272a]"
+              >
+                保存策略，下一步：配置飞书机器人（实景高亮引导）
+                <ChevronRight className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* ================= STEP 5: FEISHU BOT (LIVE SPOTLIGHT VISUAL GUIDE) ================= */}
         {step === 5 && (
           <div className="grid h-full grid-cols-12">
             <div className="col-span-7 h-full border-r border-[#eaecef]">
@@ -1148,94 +1470,30 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
 
             <div className="col-span-5 flex h-full flex-col overflow-hidden bg-[#fafafa]">
               <div className="flex-1 space-y-4 overflow-y-auto p-5">
-                {/* Privacy-Shielded Muse Co-Pilot Card */}
+                {/* 1. Feishu Credentials & Connection Card (Front & Center) */}
                 <section className="rounded-2xl border border-[#18181b] bg-white p-4 shadow-2xs">
-                  <div className="flex items-center justify-between gap-2">
-                    <h2 className="flex items-center gap-1.5 text-[13px] font-semibold text-[#111827]">
-                      <Sparkles className="h-3.5 w-3.5 text-amber-500" />
-                      扫码后让 Muse 智能接管配置（本地隐私脱敏护盾）
+                  <div className="mb-3 flex items-center justify-between gap-2">
+                    <h2 className="text-[13.5px] font-semibold text-[#111827]">
+                      飞书机器人凭证与本地长连接
                     </h2>
-                    <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] font-semibold text-emerald-800">
-                      Muse 0 接触密钥
-                    </span>
-                  </div>
-                  <p className="mt-1 text-[11px] leading-relaxed text-[#52525b]">
-                    先在左侧用手机飞书<strong>扫码登录开放平台</strong>（确认右上角企业与手机飞书一致），然后点击「<strong>🤖 让 Muse 接管配置</strong>」：Muse 会智能识别左侧界面按钮完成建应用、开机器人、导权限与配事件；所有 App Secret 密钥均在本地自动屏蔽并由本机底层暗中托管连线，<strong>绝不发送给 Muse</strong>！
-                  </p>
-                  <div className="mt-2.5 flex flex-wrap gap-2">
-                    <input
-                      value={botNameDraft}
-                      onChange={(e) => setBotNameDraft(e.target.value)}
-                      placeholder="新机器人名称（如 MuseDeck）"
-                      className="min-w-[140px] flex-1 rounded-xl border border-[#e4e4e7] bg-[#fafafa] px-3 py-1.5 text-[12px] text-[#111827] outline-none focus:border-[#18181b] focus:bg-white"
-                    />
-                    <button
-                      type="button"
-                      disabled={runningMuseCoPilot || runningFeishuAuto}
-                      onClick={() => void handleRunMuseCoPilot()}
-                      className="inline-flex shrink-0 items-center gap-1.5 rounded-xl bg-[#18181b] px-3.5 py-1.5 text-[12px] font-medium text-white transition-colors hover:bg-[#27272a] disabled:opacity-50"
-                    >
-                      {runningMuseCoPilot ? (
-                        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                      ) : (
-                        <Sparkles className="h-3.5 w-3.5 text-amber-400" />
-                      )}
-                      {runningMuseCoPilot ? '正在唤醒 Muse...' : '🤖 让 Muse 接管配置'}
-                    </button>
-                    <button
-                      type="button"
-                      disabled={runningFeishuAuto || runningMuseCoPilot}
-                      onClick={() => void handleRunFeishuAutoPilot()}
-                      className="inline-flex shrink-0 items-center gap-1 rounded-xl border border-[#e4e4e7] bg-white px-2.5 py-1.5 text-[11.5px] font-medium text-[#52525b] hover:bg-[#f4f4f5] hover:text-[#111827] disabled:opacity-50"
-                      title="若尚未打通 Muse，也可使用内置本地脚本代配"
-                    >
-                      {runningFeishuAuto ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
-                      本地脚本代配
-                    </button>
-                  </div>
-                  {feishuAutoTip && (
-                    <div className="mt-2 rounded-xl border border-[#eaecef] bg-[#fafafa] px-3 py-2 text-[11px] leading-relaxed text-[#3f3f46]">
-                      <div className="font-medium text-[#111827]">{feishuAutoTip}</div>
-                      {feishuStepReport.length > 0 && (
-                        <ul className="mt-2 space-y-1.5 border-t border-[#eaecef] pt-2">
-                          {feishuStepReport.map((item, idx) => (
-                            <li key={idx} className="flex items-start gap-1.5">
-                              <span className="mt-0.5 shrink-0">
-                                {item.status === 'ok' ? '✅' : item.status === 'warn' ? '⚠️' : '👉'}
-                              </span>
-                              <div>
-                                <span className="font-semibold text-[#111827]">{item.step}：</span>
-                                <span className="text-[#52525b]">{item.detail}</span>
-                              </div>
-                            </li>
-                          ))}
-                        </ul>
-                      )}
-                    </div>
-                  )}
-                </section>
-
-                <section className="rounded-2xl border border-[#eaecef] bg-white p-4">
-                  <div className="mb-3 flex items-center justify-between">
-                    <h2 className="text-[13.5px] font-semibold text-[#111827]">飞书机器人凭证</h2>
                     <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-[#52525b]">
                       <span
-                        className={`h-1.5 w-1.5 rounded-full ${
+                        className={`h-2 w-2 rounded-full ${
                           hasUnsavedFeishuDraft
                             ? 'bg-amber-500'
                             : isFeishuVerified
                               ? 'bg-emerald-500'
                               : isFeishuConnected
-                                ? 'animate-pulse bg-amber-500'
+                                ? 'animate-pulse bg-emerald-500'
                                 : 'bg-[#d4d4d8]'
                         }`}
                       />
                       {hasUnsavedFeishuDraft
-                        ? '新凭证待连接'
+                        ? '待点击连接'
                         : isFeishuVerified
-                          ? '当前机器人已验通'
+                          ? '已双向验通'
                           : isFeishuConnected
-                            ? '长连接在线（待发消息验通）'
+                            ? '长连接在线'
                             : '未连接'}
                     </span>
                   </div>
@@ -1244,28 +1502,61 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
                     <div className="grid grid-cols-2 gap-2">
                       <div>
                         <label className="mb-1 block text-[11.5px] font-medium text-[#52525b]">
-                          App ID
+                          App ID（进入应用后自动填入）
                         </label>
                         <input
                           value={appId}
                           onChange={(e) => setAppId(e.target.value)}
                           placeholder="cli_a1b2c3..."
-                          className="w-full rounded-xl border border-[#e4e4e7] bg-white px-3 py-1.5 text-[12px] text-[#111827] outline-none focus:border-[#18181b]"
+                          className="w-full rounded-xl border border-[#e4e4e7] bg-white px-3 py-1.5 font-mono text-[12px] text-[#111827] outline-none focus:border-[#18181b]"
                         />
                       </div>
                       <div>
-                        <label className="mb-1 block text-[11.5px] font-medium text-[#52525b]">
-                          App Secret
-                        </label>
+                        <div className="mb-1 flex items-center justify-between">
+                          <label className="text-[11.5px] font-medium text-[#52525b]">
+                            App Secret
+                          </label>
+                          <button
+                            type="button"
+                            onClick={() => void handlePasteCredentialFromClipboard()}
+                            className="inline-flex items-center gap-1 rounded bg-[#f4f4f5] px-1.5 py-0.5 text-[10.5px] font-medium text-[#111827] hover:bg-[#e4e4e7]"
+                            title="将剪贴板刚复制的密钥粘贴到此处"
+                          >
+                            <ClipboardPaste className="h-3 w-3" />
+                            粘贴密钥
+                          </button>
+                        </div>
                         <input
                           type="password"
                           value={appSecret}
                           onChange={(e) => setAppSecret(e.target.value)}
-                          placeholder="本地自动托管（也可手动粘贴）"
-                          className="w-full rounded-xl border border-[#e4e4e7] bg-white px-3 py-1.5 text-[12px] text-[#111827] outline-none focus:border-[#18181b]"
+                          placeholder="在左侧点复制或粘贴密钥"
+                          className={`w-full rounded-xl border bg-white px-3 py-1.5 text-[12px] text-[#111827] outline-none focus:border-[#18181b] ${
+                            showMissingSecretReminder
+                              ? 'border-amber-400 ring-2 ring-amber-200/70'
+                              : 'border-[#e4e4e7]'
+                          }`}
                         />
                       </div>
                     </div>
+
+                    {/* Explicit Reminder When App Secret Hasn't Been Pasted Yet */}
+                    {showMissingSecretReminder && (
+                      <div className="flex items-start gap-2 rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 text-[11.5px] leading-relaxed text-amber-950">
+                        <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
+                        <div>
+                          <strong>提醒：请粘贴 App Secret 密钥！</strong>
+                          飞书后台隐藏了密钥明文。请在左侧「<strong>凭证与基础信息</strong>」页点击{' '}
+                          <strong>App Secret 右侧的复制图标</strong>（此处会自动识别填入；若未自动填入请手动粘贴或点上方「粘贴密钥」），随后点击下方连接按钮。
+                        </div>
+                      </div>
+                    )}
+
+                    {secretToast && (
+                      <div className="rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-[11.5px] font-medium text-emerald-900">
+                        {secretToast}
+                      </div>
+                    )}
 
                     <div className="flex flex-wrap gap-2">
                       <button
@@ -1279,8 +1570,10 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
                           <Radio className="h-3.5 w-3.5" />
                         )}
                         {hasUnsavedFeishuDraft
-                          ? '连接到此新机器人（自动清空旧验证）'
-                          : '连接飞书长连接（无需公网服务器）'}
+                          ? '立即连接此机器人长连接'
+                          : isFeishuConnected
+                            ? '重新连接飞书长连接（当前已在线）'
+                            : '连接飞书长连接（第 5 步保存前必点）'}
                       </button>
 
                       {feishuBotAppLink && (
@@ -1288,7 +1581,7 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
                           type="button"
                           onClick={() => void window.fmc.openExternal(feishuBotAppLink)}
                           className="inline-flex items-center gap-1 rounded-xl border border-[#e4e4e7] bg-white px-3 py-2 text-[12px] font-medium text-[#111827] transition-colors hover:bg-[#f4f4f5]"
-                          title="发布应用版本后，点此可免搜索直接在飞书客户端打开该机器人的聊天框"
+                          title="发布应用版本后，点此免搜索直接在飞书客户端打开该机器人聊天窗"
                         >
                           <ExternalLink className="h-3.5 w-3.5" />
                           唤起机器人对话
@@ -1303,18 +1596,20 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
                           : isFeishuVerified
                             ? 'border-emerald-200 bg-emerald-50/70 text-emerald-900'
                             : isFeishuConnected
-                              ? 'border-amber-200 bg-amber-50/70 text-amber-900'
-                              : 'border-[#eaecef] bg-[#fafafa] text-[#71717a]'
+                              ? 'border-emerald-200 bg-emerald-50/70 text-emerald-900'
+                              : feishuStatus.state === 'error'
+                                ? 'border-red-200 bg-red-50 text-red-700'
+                                : 'border-[#eaecef] bg-[#fafafa] text-[#71717a]'
                       }`}
                     >
                       {hasUnsavedFeishuDraft ? (
                         <span>
-                          检测到你修改了应用凭证（尚未连接）。请点击上方黑色按钮连接到新机器人。
+                          密钥已填入（尚未连接）——<strong>请点击上方黑色按钮启动长连接</strong>，连上后再去左侧第 5 步保存订阅方式！
                         </span>
                       ) : isFeishuVerified ? (
                         <div className="flex items-center justify-between gap-2">
                           <span>
-                            当前机器人（<code className="font-mono">{trimmedAppId}</code>）已双向验通！收到测试消息：「
+                            🎉 当前机器人（<code className="font-mono">{trimmedAppId}</code>）已双向验通！收到消息：「
                             {state.feishu.lastPingMessage || '你好'}」
                           </span>
                           <button
@@ -1327,26 +1622,83 @@ export const OnboardingWizard: React.FC<OnboardingWizardProps> = ({
                         </div>
                       ) : isFeishuConnected ? (
                         <span>
-                          当前机器人（<code className="font-mono">{trimmedAppId}</code>）长连接已在线：待左侧发布版本后，点「唤起机器人对话」发一句「你好」（机器人将秒贴 👀 表情并回执）即可完成验通！
+                          ✅ 当前机器人（<code className="font-mono">{trimmedAppId}</code>）本地长连接已在线！现在可按下方第 5、6 步保存长连接并申请线上发布。
                         </span>
                       ) : (
                         <span>
                           {feishuStatus.state === 'error'
                             ? feishuStatus.message
-                            : '扫码登录左侧飞书后台后，点击上方「🤖 让 Muse 接管配置」即可自动完成'}
+                            : '请跟随下方 6 步实景高亮指引操作（左侧网页已自动标出每一步要点的红色脉冲框）'}
                         </span>
                       )}
                     </div>
                   </div>
                 </section>
 
+                {/* 2. Primary Interactive 6-Step Spotlight Visual Guide */}
                 <FeishuSetupGuide
                   feishuConnected={isFeishuConnected}
                   feishuVerified={isFeishuVerified}
                   appId={appId}
                   appSecret={appSecret}
+                  botName={botNameDraft}
+                  liveGuide={liveGuide}
                   onNavigateFeishuUrl={(url) => void window.fmc.navigateEmbeddedView('feishu', url)}
                 />
+
+                {/* 3. Optional Secondary Auto-Helper tucked cleanly in <details> */}
+                <details className="rounded-2xl border border-[#eaecef] bg-white p-3.5 text-[11.5px] text-[#52525b]">
+                  <summary className="cursor-pointer font-medium text-[#3f3f46] hover:text-[#111827]">
+                    可选实验室辅助：尝试自动执行建应用与导权限（推荐优先按上方实景高亮手动点选）
+                  </summary>
+                  <div className="mt-2.5 space-y-2 border-t border-[#f1f1f3] pt-2.5">
+                    <p className="text-[11px] leading-relaxed text-[#71717a]">
+                      注：因飞书网页改版或安全遮罩，自动点击可能无法粘入 App Secret 密钥。若执行后上方密钥框为空，请务必手动复制粘贴密钥并点连接。
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                      <input
+                        value={botNameDraft}
+                        onChange={(e) => setBotNameDraft(e.target.value)}
+                        placeholder="机器人名称（如 MuseDeck）"
+                        className="min-w-[130px] flex-1 rounded-xl border border-[#e4e4e7] bg-[#fafafa] px-2.5 py-1.5 text-[11.5px] text-[#111827] outline-none focus:border-[#18181b]"
+                      />
+                      <button
+                        type="button"
+                        disabled={runningFeishuAuto || runningMuseCoPilot}
+                        onClick={() => void handleRunFeishuAutoPilot()}
+                        className="inline-flex items-center gap-1 rounded-xl border border-[#e4e4e7] bg-white px-2.5 py-1.5 text-[11px] font-medium text-[#111827] hover:bg-[#f4f4f5] disabled:opacity-50"
+                      >
+                        {runningFeishuAuto ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+                        尝试本地脚本辅助
+                      </button>
+                      <button
+                        type="button"
+                        disabled={runningMuseCoPilot || runningFeishuAuto}
+                        onClick={() => void handleRunMuseCoPilot()}
+                        className="inline-flex items-center gap-1 rounded-xl border border-[#e4e4e7] bg-white px-2.5 py-1.5 text-[11px] font-medium text-[#111827] hover:bg-[#f4f4f5] disabled:opacity-50"
+                      >
+                        {runningMuseCoPilot ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+                        尝试 Muse 辅助领航
+                      </button>
+                    </div>
+                    {feishuAutoTip && (
+                      <div className="rounded-xl bg-[#fafafa] p-2.5 text-[11px] text-[#3f3f46]">
+                        <div className="font-medium text-[#111827]">{feishuAutoTip}</div>
+                        {feishuStepReport.length > 0 && (
+                          <ul className="mt-1.5 space-y-1 border-t border-[#eaecef] pt-1.5">
+                            {feishuStepReport.map((item, idx) => (
+                              <li key={idx}>
+                                {item.status === 'ok' ? '✅' : item.status === 'warn' ? '⚠️' : '👉'}{' '}
+                                <strong>{item.step}：</strong>
+                                {item.detail}
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </details>
               </div>
 
               <div className="flex shrink-0 items-center justify-between border-t border-[#eaecef] bg-white px-5 py-3">

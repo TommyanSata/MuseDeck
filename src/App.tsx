@@ -1267,6 +1267,7 @@ export const App: React.FC = () => {
           <CliManagerView
             clis={clis}
             scanning={scanning}
+            userProfile={state.userProfile}
             onRescan={() => void rescanClis()}
             onSaveConfig={handleSaveCliConfig}
           />

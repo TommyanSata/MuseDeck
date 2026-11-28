@@ -1092,8 +1092,8 @@ export class LocalBrowserController {
 
     if (op === 'prepare_version') {
       const appId = readCurrentAppId();
-      this.onFeishuProgress?.('🤖 Muse 正在准备 1.0.0 版本草稿，等待你点击最终发布...');
-      await setFeishuHud(wc, '✅ 配置即将完成！请在当前页点击「保存 → 申请线上发布」', 'ok');
+      this.onFeishuProgress?.('🤖 Muse 正在准备 1.0.0 版本草稿（若密钥未自动填入，请先核对右侧凭证与长连接）...');
+      await setFeishuHud(wc, '👉 请核对右侧密钥连接与事件长连接已开启后，点击「保存 → 申请线上发布」', 'warn');
       if (appId) {
         await navigateFeishuSection(wc, ['版本管理与发布'], ['创建版本', '版本管理与发布'], `https://open.feishu.cn/app/${appId}/version`);
         await sleep(800);
@@ -1715,12 +1715,14 @@ async function enableFeishuLongConnectionOnPage(
         .find((el) => el instanceof HTMLElement && el.children.length === 0 && /^(订阅方式|事件配置)$/.test((el.innerText || '').trim()));
       if (hdr instanceof HTMLElement) {
         const hr = hdr.getBoundingClientRect();
-        const svg = Array.from(document.querySelectorAll('svg')).find((s) => {
+        const svg = Array.from(document.querySelectorAll('svg, button, [role="button"]')).find((s) => {
           const sr = s.getBoundingClientRect();
-          return sr.width >= 10 && sr.width <= 36 && Math.abs(sr.top - hr.top) < 28 && sr.left > hr.right;
+          return sr.width >= 10 && sr.width <= 44 && Math.abs(sr.top - hr.top) < 28 && sr.left >= hr.right - 6 && sr.left < hr.right + 140;
         });
         if (svg) {
           const sr = svg.getBoundingClientRect();
+          const clickable = svg.closest('button, [role="button"], span') || svg;
+          if (clickable instanceof HTMLElement) clickable.click();
           return { alreadyEditable: false, pt: { x: sr.left + sr.width / 2, y: sr.top + sr.height / 2 } };
         }
       }
@@ -2498,11 +2500,14 @@ export async function runFeishuLocalAutoPilot(params: {
       detail: '已停留在版本页：请确认「可用范围」包含你自己，点底部「保存」→ 右上角「申请线上发布」变为已发布！'
     });
 
+    const secretMissing = !extractedSecret;
     const warnCount = stepReport.filter((s) => s.status === 'warn').length;
     await emitStep(
       warnCount === 0
         ? '✅ 前 5 步已全部自动完成并校验！请在当前页点「保存 → 申请线上发布」完成最后发布'
-        : `⚠️ 自动代配结束（有 ${warnCount} 项需留意右侧核对清单），最后请完成版本发布`,
+        : secretMissing
+          ? '⚠️ 密钥未能自动粘入：请先点「凭证与基础信息」复制粘贴 App Secret 并连接，再保存长连接与发布版本'
+          : `⚠️ 自动代配结束（有 ${warnCount} 项需留意右侧核对清单），最后请完成版本发布`,
       warnCount === 0 ? 'ok' : 'warn'
     );
 
@@ -2512,12 +2517,15 @@ export async function runFeishuLocalAutoPilot(params: {
       appSecret: extractedSecret || undefined,
       completedSteps,
       stepReport,
-      nextManualHint:
-        '请在左侧版本页面点击底部「保存」→ 右上角「申请线上发布」（确认状态变为绿色「已发布」），然后点右侧「唤起机器人对话」发一句「你好」即可！',
+      nextManualHint: secretMissing
+        ? '⚠️ 提醒：App Secret 密钥未能自动粘入！请点击左侧「凭证与基础信息」复制 App Secret 粘贴到上方输入框并点「连接飞书长连接」，随后在「事件与回调」点击铅笔图标→保存长连接，最后发布版本。'
+        : '请在左侧版本页面点击底部「保存」→ 右上角「申请线上发布」（确认状态变为绿色「已发布」），然后点右侧「唤起机器人对话」发一句「你好」即可！',
       message:
         warnCount === 0
           ? '✅ 前 5 步全部自动配置并校验通过！最后只需在左侧点「保存 → 申请线上发布」，再点「唤起机器人对话」发一句「你好」即可！'
-          : `已完成自动代配流程，其中有 ${warnCount} 个步骤需要你在下方清单核对确认，完成后发布版本即可。`
+          : secretMissing
+            ? '⚠️ 注意：App Secret 密钥未能自动粘入！请在左侧「凭证与基础信息」页点击复制 App Secret 粘贴到右侧输入框并点击「连接飞书长连接」，再去「事件与回调」点铅笔图标→保存开启长连接。'
+            : `已完成自动代配流程，其中有 ${warnCount} 个步骤需要你在下方清单核对确认，完成后发布版本即可。`
     };
   } catch (err) {
     return {

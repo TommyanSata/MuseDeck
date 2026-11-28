@@ -324,10 +324,38 @@ export interface ModelCapabilityProfile {
   updatedAt: string;
 }
 
+export interface UserProfileConfig {
+  profession: string;
+  purposes: string[];
+  customNote?: string;
+  recommendedAt?: string;
+  lastRecommendationSummary?: string;
+  lastRecommendationSource?: 'muse' | 'preset';
+  cliReasons?: Record<string, string>;
+}
+
+export interface FeishuLiveGuideState {
+  url: string;
+  loggedIn: boolean;
+  detectedAppId: string;
+  hasBotCapability: boolean;
+  onAuthPage: boolean;
+  onBaseInfoPage: boolean;
+  onEventPage: boolean;
+  subscriptionEditExpanded: boolean;
+  longConnectionSaved: boolean;
+  receiveEventAdded: boolean;
+  onVersionPage: boolean;
+  versionPublished: boolean;
+  activeTargetHint: string;
+  spotlightEnabled: boolean;
+}
+
 export interface FmcState {
   onboardingCompleted: boolean;
   lastSeenAppVersion?: string;
   permissionLevel: PermissionLevel;
+  userProfile?: UserProfileConfig;
   settings?: AppSettings;
   workflow?: WorkflowConfig;
   feishu: FeishuConfig;

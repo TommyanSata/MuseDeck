@@ -17,6 +17,10 @@ contextBridge.exposeInMainWorld('fmc', {
     ipcRenderer.invoke('permission:set', level),
   updateSettings: (patch: Record<string, unknown>) =>
     ipcRenderer.invoke('settings:update', patch),
+  updateUserProfile: (patch: Record<string, unknown>) =>
+    ipcRenderer.invoke('profile:update', patch),
+  recommendCliRoles: (mode: 'muse' | 'preset', profilePatch?: Record<string, unknown>) =>
+    ipcRenderer.invoke('cli:recommendRoles', mode, profilePatch),
   updateWorkflowConfig: (patch: Record<string, unknown>) =>
     ipcRenderer.invoke('workflow:updateConfig', patch),
   getWorkflowStatus: () => ipcRenderer.invoke('workflow:status'),
@@ -103,6 +107,15 @@ contextBridge.exposeInMainWorld('fmc', {
     ipcRenderer.invoke('autopilot:feishu', params),
   runMuseFeishuCoPilot: (params?: { botName?: string; botDesc?: string }) =>
     ipcRenderer.invoke('autopilot:museFeishu', params),
+  setFeishuSpotlightEnabled: (enabled: boolean) =>
+    ipcRenderer.invoke('feishuGuide:setSpotlight', enabled),
+  jumpFeishuGuideStep: (step: number, appIdHint?: string) =>
+    ipcRenderer.invoke('feishuGuide:jumpStep', step, appIdHint),
+  quickFillFeishuStep: (
+    kind: 'app_info' | 'permission_json' | 'version_draft',
+    params?: { botName?: string; botDesc?: string }
+  ) => ipcRenderer.invoke('feishuGuide:quickFill', kind, params),
+  readClipboardCredential: () => ipcRenderer.invoke('feishuGuide:readClipboard'),
   getWhatsNew: () => ipcRenderer.invoke('app:getWhatsNew'),
   ackWhatsNew: () => ipcRenderer.invoke('app:ackWhatsNew'),
   checkAppUpdate: () => ipcRenderer.invoke('app:checkUpdate'),

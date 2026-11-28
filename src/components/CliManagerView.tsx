@@ -2,18 +2,29 @@ import React, { useEffect, useRef, useState } from 'react';
 import {
   Activity,
   ArrowUpCircle,
+  Check,
   CheckCircle2,
   Download,
   Loader2,
   Plus,
   RefreshCw,
   Settings2,
+  Sparkles,
   Trash2,
+  Wand2,
   X,
   XCircle
 } from 'lucide-react';
-import { ApiProtocol, CliUpdateInfo, CliUserConfig, DetectedCli, ReasoningEffort } from '../types';
+import {
+  ApiProtocol,
+  CliUpdateInfo,
+  CliUserConfig,
+  DetectedCli,
+  ReasoningEffort,
+  UserProfileConfig
+} from '../types';
 import { CliBrandIcon } from './CliBrandIcon';
+import { PROFESSION_OPTIONS, PURPOSE_OPTIONS } from './OnboardingWizard';
 
 const EFFORT_OPTIONS: Array<{ id: ReasoningEffort; label: string }> = [
   { id: 'default', label: '默认' },
@@ -87,6 +98,7 @@ function previewCompletedUrls(protocol: ApiProtocol, rawBase: string, cliId: str
 interface CliManagerViewProps {
   clis: DetectedCli[];
   scanning: boolean;
+  userProfile?: UserProfileConfig;
   onRescan: () => void;
   onSaveConfig: (cliId: string, config: CliUserConfig) => Promise<void>;
   compact?: boolean;
@@ -105,6 +117,7 @@ interface PkgTaskModal {
 export const CliManagerView: React.FC<CliManagerViewProps> = ({
   clis,
   scanning,
+  userProfile,
   onRescan,
   onSaveConfig,
   compact = false
@@ -115,6 +128,20 @@ export const CliManagerView: React.FC<CliManagerViewProps> = ({
   const [scanningModels, setScanningModels] = useState(false);
   const [scannedModels, setScannedModels] = useState<string[]>([]);
   const [scanHint, setScanHint] = useState('');
+
+  // Smart Role Recommendation Modal state (available anytime in CLI Manager!)
+  const [showRecommendModal, setShowRecommendModal] = useState(false);
+  const [profDraft, setProfDraft] = useState(userProfile?.profession || '');
+  const [purpDraft, setPurpDraft] = useState<string[]>(userProfile?.purposes || []);
+  const [noteDraft, setNoteDraft] = useState(userProfile?.customNote || '');
+  const [recommending, setRecommending] = useState<'muse' | 'preset' | null>(null);
+  const [recommendMsg, setRecommendMsg] = useState('');
+
+  useEffect(() => {
+    setProfDraft(userProfile?.profession || '');
+    setPurpDraft(userProfile?.purposes || []);
+    setNoteDraft(userProfile?.customNote || '');
+  }, [userProfile?.profession, userProfile?.customNote, userProfile?.recommendedAt]);
 
   // Endpoint latency test & quota/balance probe state (CC-Switch style)
   const [testingEndpoint, setTestingEndpoint] = useState(false);
@@ -377,6 +404,28 @@ export const CliManagerView: React.FC<CliManagerViewProps> = ({
             <p className="mt-0.5 truncate font-mono text-[11px] text-[#8a8f98]">
               {cli.installed ? cli.executablePath : cli.installCmd}
             </p>
+            {(() => {
+              const rw = cli.config.roleWeights || {};
+              const activePairs = Object.entries(rw)
+                .filter(([, w]) => w > 0)
+                .sort((a, b) => b[1] - a[1]);
+              if (activePairs.length === 0) return null;
+              return (
+                <div className="mt-1 flex flex-wrap items-center gap-1">
+                  {activePairs.slice(0, 5).map(([role, w]) => (
+                    <span
+                      key={role}
+                      className="rounded bg-[#f4f4f5] px-1.5 py-0.2 text-[10px] font-medium text-[#3f3f46]"
+                    >
+                      {role} {w}/5
+                    </span>
+                  ))}
+                  {activePairs.length > 5 && (
+                    <span className="text-[10px] text-[#8a8f98]">+{activePairs.length - 5}</span>
+                  )}
+                </div>
+              );
+            })()}
           </div>
         </div>
 
@@ -483,6 +532,17 @@ export const CliManagerView: React.FC<CliManagerViewProps> = ({
           </div>
           <div className="flex items-center gap-2">
             <button
+              onClick={() => {
+                setRecommendMsg('');
+                setShowRecommendModal(true);
+              }}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-[#18181b] px-2.5 py-1 text-[12px] font-medium text-white transition-colors hover:bg-[#27272a]"
+              title="根据你的职业与软件用途，让 Muse 智能推荐各 CLI 的职能分工与思考等级"
+            >
+              <Sparkles className="h-3.5 w-3.5 text-amber-400" />
+              智能职能推荐
+            </button>
+            <button
               onClick={() => void handleCheckUpdates()}
               disabled={checkingUpdates}
               className="inline-flex items-center gap-1.5 rounded-lg border border-[#e4e4e7] bg-white px-2.5 py-1 text-[12px] font-medium text-[#3f3f46] transition-colors hover:bg-[#f4f4f5] hover:text-[#111827] disabled:opacity-50"
@@ -505,9 +565,23 @@ export const CliManagerView: React.FC<CliManagerViewProps> = ({
       <div className={`flex-1 overflow-y-auto ${compact ? '' : 'px-6 py-6'}`}>
         <div className={compact ? 'space-y-4' : 'mx-auto max-w-[940px] space-y-6'}>
           {!compact && (
-            <p className="text-[12.5px] text-[#71717a]">
-              参考 CC-Switch 管理体验：支持一键安装 / 更新 / 卸载、实时版本比对、常用供应商预设及端点延迟测速。所有配置均保存在 FMC 独立沙箱，绝不修改本机 CLI 原配置文件。
-            </p>
+            <div className="space-y-2">
+              <p className="text-[12.5px] text-[#71717a]">
+                支持一键安装 / 更新 / 卸载、实时版本比对、常用供应商预设及端点延迟测速。所有配置均保存在 MuseDeck 独立沙箱，绝不修改本机 CLI 原配置文件。
+              </p>
+              {userProfile?.lastRecommendationSummary && (
+                <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-emerald-200/80 bg-emerald-50/60 px-3.5 py-2 text-[11.5px] text-emerald-950">
+                  <span>✨ {userProfile.lastRecommendationSummary}</span>
+                  <button
+                    type="button"
+                    onClick={() => setShowRecommendModal(true)}
+                    className="shrink-0 rounded-md bg-white px-2 py-0.5 text-[11px] font-medium text-emerald-900 ring-1 ring-emerald-200 hover:bg-emerald-100"
+                  >
+                    修改画像 / 重新推荐
+                  </button>
+                </div>
+              )}
+            </div>
           )}
 
           <section className="overflow-hidden rounded-2xl border border-[#eaecef] bg-white">
@@ -1203,6 +1277,165 @@ export const CliManagerView: React.FC<CliManagerViewProps> = ({
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {/* Smart Role Recommendation Modal (Profession + Purpose -> Muse / Preset) */}
+      {showRecommendModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/25 p-4 backdrop-blur-[1px]">
+          <div className="flex max-h-[88vh] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-[#e4e4e7] bg-white shadow-popover">
+            <div className="flex items-center justify-between border-b border-[#eaecef] px-5 py-3.5">
+              <div className="flex items-center gap-2">
+                <Sparkles className="h-4 w-4 text-amber-500" />
+                <h3 className="text-[14px] font-semibold text-[#111827]">
+                  按职业与用途智能推荐 CLI 职能分工
+                </h3>
+              </div>
+              <button
+                onClick={() => setShowRecommendModal(false)}
+                className="rounded-lg p-1 text-[#8a8f98] hover:bg-[#f4f4f5] hover:text-[#111827]"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="flex-1 space-y-3.5 overflow-y-auto p-5 text-[12.5px]">
+              <p className="text-[12px] text-[#52525b]">
+                填写你的大概职业与软件用途后，可让 Muse 结合本机已装模型池智能推荐各 CLI 的职能权重与思考等级；推荐生效后，你仍可随时点击任意 CLI 的「配置」按钮手动微调。
+              </p>
+
+              <div>
+                <label className="mb-1.5 block font-medium text-[#3f3f46]">你的职业 / 身份</label>
+                <div className="flex flex-wrap gap-1.5">
+                  {PROFESSION_OPTIONS.map((opt) => (
+                    <button
+                      key={opt}
+                      type="button"
+                      onClick={() => setProfDraft(opt)}
+                      className={`rounded-lg border px-2.5 py-1 text-[11.5px] font-medium transition-colors ${
+                        profDraft === opt
+                          ? 'border-[#18181b] bg-[#18181b] text-white'
+                          : 'border-[#e4e4e7] bg-[#fafafa] text-[#3f3f46] hover:bg-[#f4f4f5]'
+                      }`}
+                    >
+                      {opt}
+                    </button>
+                  ))}
+                </div>
+                <input
+                  value={profDraft}
+                  onChange={(e) => setProfDraft(e.target.value)}
+                  placeholder="也可直接输入具体职业，如：科研博士 / 独立开发者..."
+                  className="mt-2 w-full rounded-xl border border-[#e4e4e7] px-3 py-1.5 text-[12px] text-[#111827] outline-none focus:border-[#18181b]"
+                />
+              </div>
+
+              <div>
+                <label className="mb-1.5 block font-medium text-[#3f3f46]">
+                  主要使用目的（可多选）
+                </label>
+                <div className="flex flex-wrap gap-1.5">
+                  {PURPOSE_OPTIONS.map((p) => {
+                    const active = purpDraft.includes(p);
+                    return (
+                      <button
+                        key={p}
+                        type="button"
+                        onClick={() =>
+                          setPurpDraft((prev) =>
+                            prev.includes(p) ? prev.filter((x) => x !== p) : [...prev, p]
+                          )
+                        }
+                        className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-[11.5px] font-medium transition-colors ${
+                          active
+                            ? 'border-emerald-600 bg-emerald-50 text-emerald-900'
+                            : 'border-[#e4e4e7] bg-white text-[#52525b] hover:bg-[#fafafa]'
+                        }`}
+                      >
+                        {active && <Check className="h-3 w-3 text-emerald-600" />}
+                        {p}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div>
+                <label className="mb-1 block font-medium text-[#3f3f46]">补充说明（可选）</label>
+                <input
+                  value={noteDraft}
+                  onChange={(e) => setNoteDraft(e.target.value)}
+                  placeholder="例如：主要写 Python 数据处理与 React 前端"
+                  className="w-full rounded-xl border border-[#e4e4e7] px-3 py-1.5 text-[12px] text-[#111827] outline-none focus:border-[#18181b]"
+                />
+              </div>
+
+              {recommendMsg && (
+                <div className="rounded-xl border border-emerald-200 bg-emerald-50/70 px-3 py-2 text-[11.5px] leading-relaxed text-emerald-950">
+                  {recommendMsg}
+                </div>
+              )}
+            </div>
+
+            <div className="flex flex-wrap justify-between gap-2 border-t border-[#eaecef] px-5 py-3">
+              <button
+                type="button"
+                disabled={Boolean(recommending)}
+                onClick={async () => {
+                  setRecommending('preset');
+                  try {
+                    const r = await window.fmc.recommendCliRoles('preset', {
+                      profession: profDraft.trim(),
+                      purposes: purpDraft,
+                      customNote: noteDraft.trim()
+                    });
+                    setRecommendMsg(r.message);
+                  } finally {
+                    setRecommending(null);
+                  }
+                }}
+                className="inline-flex items-center gap-1.5 rounded-xl border border-[#e4e4e7] bg-[#fafafa] px-3.5 py-2 text-[12px] font-medium text-[#111827] hover:bg-[#f4f4f5] disabled:opacity-50"
+              >
+                <Wand2 className="h-3.5 w-3.5 text-amber-500" />
+                秒级套用预设推荐
+              </button>
+
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => setShowRecommendModal(false)}
+                  className="rounded-xl border border-[#e4e4e7] px-3.5 py-2 text-[12px] font-medium text-[#52525b] hover:bg-[#f4f4f5]"
+                >
+                  关闭
+                </button>
+                <button
+                  type="button"
+                  disabled={Boolean(recommending)}
+                  onClick={async () => {
+                    setRecommending('muse');
+                    try {
+                      const r = await window.fmc.recommendCliRoles('muse', {
+                        profession: profDraft.trim(),
+                        purposes: purpDraft,
+                        customNote: noteDraft.trim()
+                      });
+                      setRecommendMsg(r.message);
+                    } finally {
+                      setRecommending(null);
+                    }
+                  }}
+                  className="inline-flex items-center gap-1.5 rounded-xl bg-[#18181b] px-4 py-2 text-[12px] font-medium text-white hover:bg-[#27272a] disabled:opacity-50"
+                >
+                  {recommending === 'muse' ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <Sparkles className="h-3.5 w-3.5 text-amber-400" />
+                  )}
+                  让 Muse 智能推荐配置
+                </button>
+              </div>
+            </div>
+          </div>
         </div>
       )}
     </div>

@@ -31,6 +31,14 @@ export interface WhatsNewInfo {
 }
 
 export const BUILTIN_RELEASE_HIGHLIGHTS: Record<string, { title: string; highlights: string[] }> = {
+  '0.8.0': {
+    title: '职业用途画像智能职能推荐 · 飞书 6 步实景高亮脉冲指引',
+    highlights: [
+      '向导第 1 步新增「职业与使用目的画像」，打通 Muse 后可一键结合个人背景与已装模型池智能推荐各 CLI 职能与权重（后续随时可在 CLI 管理与设置中修改）',
+      '全新「飞书 6 步实景高亮脉冲动画指引」：在左侧飞书后台实时标出红色脉冲框与浮动步骤气泡，明确拆分「点击订阅方式旁铅笔图标 ✏️ → 点击保存」两步长连接开启校验',
+      '凭证页支持点击复制 App Secret 后自动捕获填入 + 一键粘贴按钮 + 未粘贴密钥醒目提醒，稳妥零出错'
+    ]
+  },
   '0.7.3': {
     title: '修复飞书代配长连接自动开启、新机器人凭证覆盖与第 4 步状态显示',
     highlights: [

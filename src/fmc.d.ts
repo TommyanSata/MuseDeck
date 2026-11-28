@@ -24,6 +24,11 @@ export interface FmcApi {
   }) => Promise<FmcState>;
   setPermissionLevel: (level: import('./types').PermissionLevel) => Promise<FmcState>;
   updateSettings: (patch: Partial<import('./types').AppSettings>) => Promise<FmcState>;
+  updateUserProfile: (patch: Partial<import('./types').UserProfileConfig>) => Promise<FmcState>;
+  recommendCliRoles: (
+    mode: 'muse' | 'preset',
+    profilePatch?: Partial<import('./types').UserProfileConfig>
+  ) => Promise<{ ok: boolean; mode: 'muse' | 'preset'; message: string; state?: FmcState }>;
   updateWorkflowConfig: (patch: Partial<import('./types').WorkflowConfig>) => Promise<FmcState>;
   getWorkflowStatus: () => Promise<import('./types').WorkflowRunState>;
   approveProject: () => Promise<import('./types').WorkflowRunState>;
@@ -155,6 +160,20 @@ export interface FmcApi {
     botName?: string;
     botDesc?: string;
   }) => Promise<{ ok: boolean; needLogin?: boolean; needTunnel?: boolean; message: string }>;
+  setFeishuSpotlightEnabled: (enabled: boolean) => Promise<boolean>;
+  jumpFeishuGuideStep: (
+    step: number,
+    appIdHint?: string
+  ) => Promise<{ ok: boolean; message: string }>;
+  quickFillFeishuStep: (
+    kind: 'app_info' | 'permission_json' | 'version_draft',
+    params?: { botName?: string; botDesc?: string }
+  ) => Promise<{ ok: boolean; message: string }>;
+  readClipboardCredential: () => Promise<{
+    raw: string;
+    appId?: string;
+    appSecret?: string;
+  }>;
   getWhatsNew: () => Promise<import('./types').WhatsNewInfo>;
   ackWhatsNew: () => Promise<FmcState>;
   checkAppUpdate: () => Promise<import('./types').AppUpdateCheckResult>;

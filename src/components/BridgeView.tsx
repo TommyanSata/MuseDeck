@@ -1,10 +1,13 @@
 import React, { useEffect, useState } from 'react';
 import {
+  AlertCircle,
   BookOpen,
   Check,
   CheckCircle2,
+  ClipboardPaste,
   Cloud,
   Copy,
+  Crosshair,
   KeyRound,
   Loader2,
   RefreshCw,
@@ -14,7 +17,13 @@ import {
   X,
   XCircle
 } from 'lucide-react';
-import { FeishuAutoStepReport, FeishuStatusEvent, FmcState, TunnelStatusEvent } from '../types';
+import {
+  FeishuAutoStepReport,
+  FeishuLiveGuideState,
+  FeishuStatusEvent,
+  FmcState,
+  TunnelStatusEvent
+} from '../types';
 import { FeishuSetupGuide } from './FeishuSetupGuide';
 
 interface BridgeViewProps {
@@ -36,6 +45,7 @@ export const BridgeView: React.FC<BridgeViewProps> = ({ state, feishuStatus }) =
   const [museCoPilotRunning, setMuseCoPilotRunning] = useState(false);
   const [autoTip, setAutoTip] = useState('');
   const [autoStepReport, setAutoStepReport] = useState<FeishuAutoStepReport[]>([]);
+  const [liveGuide, setLiveGuide] = useState<FeishuLiveGuideState | null>(null);
 
   useEffect(() => {
     setAppId(state.feishu.appId || '');
@@ -56,9 +66,22 @@ export const BridgeView: React.FC<BridgeViewProps> = ({ state, feishuStatus }) =
       const p = payload as { message?: string };
       if (p?.message) setAutoTip(p.message);
     });
+    const offGuide = window.fmc.onEvent('feishuGuide:state', (payload) => {
+      setLiveGuide(payload as FeishuLiveGuideState);
+    });
+    const offCred = window.fmc.onEvent('feishuGuide:credentialCaptured', (payload) => {
+      const c = payload as { appId?: string; appSecret?: string };
+      if (c.appId) setAppId(c.appId);
+      if (c.appSecret) {
+        setAppSecret(c.appSecret);
+        setAutoTip('✨ 已自动识别填入你刚复制的 App Secret，请点击下方「连接此新机器人」按钮！');
+      }
+    });
     return () => {
       off();
       offAuto();
+      offGuide();
+      offCred();
     };
   }, []);
 
@@ -183,75 +206,30 @@ export const BridgeView: React.FC<BridgeViewProps> = ({ state, feishuStatus }) =
               </div>
 
               <div className="space-y-3 text-[12.5px]">
-                {/* Privacy-Shielded Muse Feishu Co-Pilot + Local Fallback */}
+                {/* Live Spotlight Guide Launcher (Primary Recommended) */}
                 <div className="rounded-xl border border-[#18181b] bg-[#fafafa] p-3">
                   <div className="flex items-center justify-between gap-2">
                     <div className="text-[11.5px] font-semibold text-[#111827]">
-                      🤖 让 Muse 智能接管飞书配置（推荐 · 本地隐私脱敏护盾）
+                      🎯 飞书开放平台 6 步实景高亮跟做指引（推荐 · 稳妥零出错）
                     </div>
-                    <span className="rounded bg-emerald-100 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-800">
-                      Muse 0 接触密钥
+                    <span className="rounded bg-red-50 px-1.5 py-0.5 text-[10px] font-semibold text-red-700 ring-1 ring-red-200">
+                      动态脉冲框提示
                     </span>
                   </div>
                   <div className="mt-1 text-[11px] leading-relaxed text-[#52525b]">
-                    弹出本地飞书开放平台窗口，用手机飞书<strong>扫码登录</strong>后点下方按钮：Muse 将通过可视化页面快照智能点选建应用、开机器人、导权限与配事件；所有 App Secret 密钥均由本机底层自动屏蔽并暗中托管连线，<strong>绝不外传给 Muse</strong>。
+                    打开飞书开放平台窗口并自动用<strong>红色呼吸脉冲框 + 气泡</strong>标出每一步点击位置（含长连接「点铅笔图标 ✏️ → 点保存」两步校验与复制密钥自动填入）。
                   </div>
                   <div className="mt-2 flex flex-wrap gap-2">
-                    <input
-                      value={botNameDraft}
-                      onChange={(e) => setBotNameDraft(e.target.value)}
-                      placeholder="机器人名称（如 MuseDeck）"
-                      className="min-w-[140px] flex-1 rounded-lg border border-[#e4e4e7] bg-white px-2.5 py-1.5 text-[12px] outline-none focus:border-[#18181b]"
-                    />
                     <button
                       type="button"
-                      disabled={museCoPilotRunning || autoRunning}
                       onClick={async () => {
-                        setMuseCoPilotRunning(true);
-                        setAutoStepReport([]);
-                        setAutoTip('正在打开本地飞书窗口并检查登录与隐私脱敏通道...');
-                        try {
-                          const r = await window.fmc.runMuseFeishuCoPilot({
-                            botName: botNameDraft
-                          });
-                          setAutoTip(r.message);
-                        } finally {
-                          setMuseCoPilotRunning(false);
-                        }
+                        setShowGuide(true);
+                        await window.fmc.jumpFeishuGuideStep(1, trimmedAppId || undefined);
                       }}
-                      className="inline-flex shrink-0 items-center gap-1 rounded-lg bg-[#18181b] px-3 py-1.5 text-[11.5px] font-medium text-white hover:bg-[#27272a] disabled:opacity-50"
+                      className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-[#18181b] px-3 py-1.5 text-[11.5px] font-medium text-white hover:bg-[#27272a]"
                     >
-                      {museCoPilotRunning ? (
-                        <Loader2 className="h-3 w-3 animate-spin" />
-                      ) : (
-                        <Sparkles className="h-3 w-3 text-amber-400" />
-                      )}
-                      {museCoPilotRunning ? '正在唤醒 Muse...' : '🤖 让 Muse 接管配置'}
-                    </button>
-                    <button
-                      type="button"
-                      disabled={autoRunning || museCoPilotRunning}
-                      onClick={async () => {
-                        setAutoRunning(true);
-                        setAutoStepReport([]);
-                        setAutoTip('正在打开本地飞书开放平台助手并执行本地脚本代配...');
-                        try {
-                          const r = await window.fmc.runFeishuAutoPilot({
-                            botName: botNameDraft
-                          });
-                          if (r.appId) setAppId(r.appId);
-                          if (r.appSecret) setAppSecret(r.appSecret);
-                          if (r.stepReport) setAutoStepReport(r.stepReport);
-                          setAutoTip(r.message);
-                        } finally {
-                          setAutoRunning(false);
-                        }
-                      }}
-                      className="inline-flex shrink-0 items-center gap-1 rounded-lg border border-[#e4e4e7] bg-white px-2.5 py-1.5 text-[11px] font-medium text-[#52525b] hover:bg-[#f4f4f5] hover:text-[#111827] disabled:opacity-50"
-                      title="无需连接 Muse，使用内置本地固定脚本代配"
-                    >
-                      {autoRunning ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
-                      本地脚本代配
+                      <Crosshair className="h-3.5 w-3.5 text-red-400" />
+                      打开飞书后台 + 6 步实景高亮指引
                     </button>
                   </div>
                   {autoTip && (
@@ -281,18 +259,44 @@ export const BridgeView: React.FC<BridgeViewProps> = ({ state, feishuStatus }) =
                   <input
                     value={appId}
                     onChange={(e) => setAppId(e.target.value)}
+                    placeholder="cli_a1b2c3..."
                     className="w-full rounded-xl border border-[#e4e4e7] bg-white px-3 py-2 text-[#111827] outline-none transition-colors focus:border-[#18181b]"
                   />
                 </div>
                 <div>
-                  <label className="mb-1 block font-medium text-[#3f3f46]">App Secret</label>
+                  <div className="mb-1 flex items-center justify-between">
+                    <label className="font-medium text-[#3f3f46]">App Secret</label>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const res = await window.fmc.readClipboardCredential();
+                        if (res.appSecret) setAppSecret(res.appSecret);
+                        else if (res.appId) setAppId(res.appId);
+                        else if (res.raw) setAppSecret(res.raw);
+                      }}
+                      className="inline-flex items-center gap-1 rounded bg-[#f4f4f5] px-1.5 py-0.5 text-[10.5px] font-medium text-[#111827] hover:bg-[#e4e4e7]"
+                    >
+                      <ClipboardPaste className="h-3 w-3" />
+                      粘贴剪贴板密钥
+                    </button>
+                  </div>
                   <input
                     type="password"
                     value={appSecret}
                     onChange={(e) => setAppSecret(e.target.value)}
+                    placeholder="在飞书凭证页点复制图标后自动填入或粘贴"
                     className="w-full rounded-xl border border-[#e4e4e7] bg-white px-3 py-2 text-[#111827] outline-none transition-colors focus:border-[#18181b]"
                   />
                 </div>
+
+                {/^cli_[a-zA-Z0-9]+$/.test(trimmedAppId) && !trimmedAppSecret && (
+                  <div className="flex items-start gap-1.5 rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 text-[11.5px] text-amber-950">
+                    <AlertCircle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600" />
+                    <span>
+                      <strong>提醒：请粘贴 App Secret 密钥！</strong>请在飞书「凭证与基础信息」页点击 App Secret 旁的复制图标（或点上方「粘贴剪贴板密钥」），随后点击下方连接按钮。
+                    </span>
+                  </div>
+                )}
 
                 <div className="flex flex-wrap gap-2 pt-1">
                   <button
@@ -560,6 +564,8 @@ export const BridgeView: React.FC<BridgeViewProps> = ({ state, feishuStatus }) =
                 feishuVerified={isFeishuVerified}
                 appId={appId}
                 appSecret={appSecret}
+                botName={botNameDraft}
+                liveGuide={liveGuide}
               />
             </div>
             <div className="flex justify-end border-t border-[#eaecef] px-5 py-3">

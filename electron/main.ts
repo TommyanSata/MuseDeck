@@ -39,9 +39,21 @@ import {
 } from './cliScanner';
 import { buildMuseBrief, ControlServer, isWithinQuietHours } from './controlServer';
 import { FeishuBridge, FeishuIncomingContext } from './feishuBridge';
+import { FeishuSpotlightController } from './feishuSpotlightGuide';
 import { QuotaManager } from './quotaManager';
+import {
+  buildMuseRoleRecommendationPrompt,
+  computeSmartRoleRecommendations
+} from './roleRecommender';
 import { readLocalCliSessionMessages, scanLocalCliSessions } from './sessionScanner';
-import { AppSettings, CliId, CliUserConfig, FmcStore, WorkflowConfig } from './store';
+import {
+  AppSettings,
+  CliId,
+  CliUserConfig,
+  FmcStore,
+  UserProfileConfig,
+  WorkflowConfig
+} from './store';
 import { TunnelManager } from './tunnelManager';
 import { WorkflowManager } from './workflowManager';
 
@@ -63,6 +75,7 @@ let workflow: WorkflowManager;
 let benchmarks: BenchmarkManager;
 let quotas: QuotaManager;
 let localBrowser: LocalBrowserController;
+let feishuSpotlight: FeishuSpotlightController | null = null;
 let feishuPopupWin: BrowserWindow | null = null;
 let cachedClis: DetectedCli[] | null = null;
 
@@ -204,8 +217,26 @@ function ensureEmbeddedView(target: 'feishu' | 'muse', initialUrl?: string): Web
   return view;
 }
 
+function syncDetectedFeishuAppId(detectedAppId: string): void {
+  const prev = store.getState().feishu;
+  if (prev.appId === detectedAppId) return;
+  feishu.disconnect();
+  const next = store.update((s) => {
+    s.feishu.appId = detectedAppId;
+    s.feishu.appSecret = '';
+    s.feishu.verified = false;
+    s.feishu.verifiedAppId = undefined;
+    s.feishu.verifiedAt = undefined;
+    s.feishu.lastChatId = undefined;
+    s.feishu.lastSenderOpenId = undefined;
+    s.feishu.lastPingMessage = undefined;
+  });
+  broadcast('state:changed', next);
+}
+
 function hideAllEmbeddedViews(): void {
   if (!mainWindow || mainWindow.isDestroyed()) return;
+  feishuSpotlight?.detach();
   const feishuView = embeddedViews.feishu;
   if (feishuView) {
     try {
@@ -2454,6 +2485,7 @@ function registerIpcHandlers(): void {
         return { action: 'deny' };
       });
       feishuPopupWin.on('closed', () => {
+        feishuSpotlight?.detach();
         feishuPopupWin = null;
       });
       await feishuPopupWin.loadURL('https://open.feishu.cn/app');
@@ -2462,24 +2494,6 @@ function registerIpcHandlers(): void {
       feishuPopupWin.focus();
     }
     return feishuPopupWin.webContents;
-  };
-
-  // Reset stale old-bot connection & credentials whenever user starts configuring a new/different Feishu app
-  const syncDetectedFeishuAppId = (detectedAppId: string) => {
-    const prev = store.getState().feishu;
-    if (prev.appId === detectedAppId) return;
-    feishu.disconnect();
-    const next = store.update((s) => {
-      s.feishu.appId = detectedAppId;
-      s.feishu.appSecret = '';
-      s.feishu.verified = false;
-      s.feishu.verifiedAppId = undefined;
-      s.feishu.verifiedAt = undefined;
-      s.feishu.lastChatId = undefined;
-      s.feishu.lastSenderOpenId = undefined;
-      s.feishu.lastPingMessage = undefined;
-    });
-    broadcast('state:changed', next);
   };
 
   ipcMain.handle(
@@ -2649,6 +2663,9 @@ function registerIpcHandlers(): void {
         width: Math.max(100, Math.round(bounds.width)),
         height: Math.max(100, Math.round(bounds.height))
       });
+      if (target === 'feishu') {
+        feishuSpotlight?.attach(view.webContents);
+      }
       return true;
     }
   );
@@ -2680,6 +2697,159 @@ function registerIpcHandlers(): void {
       return true;
     }
     return false;
+  });
+
+  ipcMain.handle('profile:update', (_ev, patch: Partial<UserProfileConfig>) => {
+    const st = store.update((s) => {
+      s.userProfile = {
+        profession: '',
+        purposes: [],
+        ...(s.userProfile || {}),
+        ...patch
+      };
+    });
+    broadcast('state:changed', st);
+    scheduleBriefAutoSync(2500);
+    return st;
+  });
+
+  ipcMain.handle(
+    'cli:recommendRoles',
+    async (_ev, mode: 'muse' | 'preset', profilePatch?: Partial<UserProfileConfig>) => {
+      if (profilePatch) {
+        store.update((s) => {
+          s.userProfile = {
+            profession: '',
+            purposes: [],
+            ...(s.userProfile || {}),
+            ...profilePatch
+          };
+        });
+      }
+      const curState = store.getState();
+      const profile: UserProfileConfig = curState.userProfile || { profession: '', purposes: [] };
+      const clis = await getFastClis(curState);
+
+      if (mode === 'preset') {
+        const plan = computeSmartRoleRecommendations(profile, clis);
+        const nextSt = store.update((s) => {
+          const reasonsMap: Record<string, string> = { ...(s.userProfile?.cliReasons || {}) };
+          for (const rec of plan.recommendations) {
+            const prev = s.cliConfigs[rec.cliId] || {
+              enabled: true,
+              authMode: 'oauth' as const,
+              apiKey: '',
+              baseUrl: '',
+              defaultModel: '',
+              extraArgs: ''
+            };
+            const activeRoles = Object.entries(rec.roleWeights)
+              .filter(([, w]) => w > 0)
+              .map(([r]) => r);
+            s.cliConfigs[rec.cliId] = {
+              ...prev,
+              enabled: true,
+              defaultModel: rec.defaultModel || prev.defaultModel,
+              reasoningEffort: rec.reasoningEffort || prev.reasoningEffort || 'medium',
+              roleWeights: rec.roleWeights,
+              roles: activeRoles
+            };
+            reasonsMap[rec.cliId] = rec.reason;
+          }
+          s.workflow.decisionWeights = plan.decisionWeights;
+          s.userProfile = {
+            ...profile,
+            recommendedAt: new Date().toISOString(),
+            lastRecommendationSource: 'preset',
+            lastRecommendationSummary: plan.summary,
+            cliReasons: reasonsMap
+          };
+        });
+        broadcast('state:changed', nextSt);
+        return {
+          ok: true,
+          mode: 'preset' as const,
+          message: plan.summary,
+          state: nextSt
+        };
+      }
+
+      // mode === 'muse': Ask live Muse over HTTP tunnel to tailor & POST /api/v1/clis/apply-recommendations
+      const baseUrl = (tunnel?.getStatus().url || curState.controlApi.tunnelUrl || '')
+        .trim()
+        .replace(/\/+$/, '');
+      if (!baseUrl) {
+        return {
+          ok: false,
+          mode: 'muse' as const,
+          message:
+            '当前尚未开启公网隧道连通 Muse。你可以先去上一步连通 Muse，或直接点击右侧「⚡ 快速套用场景预设推荐」秒级完成配置！'
+        };
+      }
+      await syncLatestBriefToMuse(false);
+      const prompt = buildMuseRoleRecommendationPrompt(
+        baseUrl,
+        curState.controlApi.token,
+        profile,
+        clis
+      );
+      const sent = await sendTextToMuseChat(prompt);
+      if (!sent.ok) {
+        return {
+          ok: false,
+          mode: 'muse' as const,
+          message: `${sent.message}（也可先点击「⚡ 快速套用场景预设推荐」立即生效）`
+        };
+      }
+      return {
+        ok: true,
+        mode: 'muse' as const,
+        message:
+          '✨ 已将你的职业与用途发给 Muse！Muse 正在结合各家模型能力为你写入定制职能与权重（约 5~15 秒内下方卡片将自动实时刷新，后续也随时可改）...'
+      };
+    }
+  );
+
+  ipcMain.handle('feishuGuide:setSpotlight', (_ev, enabled: boolean) => {
+    feishuSpotlight?.setSpotlightEnabled(Boolean(enabled));
+    return true;
+  });
+
+  ipcMain.handle('feishuGuide:jumpStep', async (_ev, step: number, appIdHint?: string) => {
+    if (!feishuSpotlight) return { ok: false, message: '引导助手未就绪' };
+    if (activeEmbedded === 'feishu' && embeddedViews.feishu) {
+      feishuSpotlight.attach(embeddedViews.feishu.webContents);
+    } else {
+      const wc = await ensureFeishuConsoleWc();
+      feishuSpotlight.attach(wc);
+    }
+    return feishuSpotlight.jumpToStep(step, appIdHint);
+  });
+
+  ipcMain.handle(
+    'feishuGuide:quickFill',
+    async (
+      _ev,
+      kind: 'app_info' | 'permission_json' | 'version_draft',
+      params?: { botName?: string; botDesc?: string }
+    ) => {
+      if (!feishuSpotlight) return { ok: false, message: '引导助手未就绪' };
+      if (activeEmbedded === 'feishu' && embeddedViews.feishu) {
+        feishuSpotlight.attach(embeddedViews.feishu.webContents);
+      }
+      return feishuSpotlight.quickFill(kind, params);
+    }
+  );
+
+  ipcMain.handle('feishuGuide:readClipboard', () => {
+    const raw = clipboard.readText().trim();
+    if (/^cli_[a-zA-Z0-9]+$/.test(raw)) {
+      return { raw, appId: raw };
+    }
+    if (/^[A-Za-z0-9_-]{20,56}$/.test(raw) && !raw.startsWith('cli_')) {
+      return { raw, appSecret: raw };
+    }
+    return { raw };
   });
 
   ipcMain.handle('settings:update', (_ev, patch: Partial<AppSettings>) => {
@@ -2941,6 +3111,37 @@ app.whenReady().then(async () => {
   quotas = new QuotaManager(store);
   workflow.attachQuotaServices(quotas, (req: DispatchRequest) => runner.dispatch(req));
   localBrowser = new LocalBrowserController();
+  feishuSpotlight = new FeishuSpotlightController({
+    getBridgeContext: () => {
+      const fsCfg = store.getState().feishu;
+      const fsSt = feishu.getStatus();
+      const connected =
+        Boolean(fsCfg.appId && fsCfg.appSecret) &&
+        fsSt.state === 'connected' &&
+        (!fsSt.connectedAppId || fsSt.connectedAppId === fsCfg.appId);
+      return {
+        hasAppSecret: Boolean((fsCfg.appSecret || '').trim()),
+        feishuConnected: connected,
+        feishuVerified: Boolean(fsCfg.verified && fsCfg.verifiedAppId === fsCfg.appId)
+      };
+    },
+    onGuideState: (guideState) => {
+      broadcast('feishuGuide:state', guideState);
+    },
+    onCredentialCaptured: (cred) => {
+      if (cred.appId && cred.appId !== store.getState().feishu.appId) {
+        syncDetectedFeishuAppId(cred.appId);
+        broadcast('feishuGuide:credentialCaptured', { appId: cred.appId });
+      }
+      if (cred.appSecret && cred.appSecret !== store.getState().feishu.appSecret) {
+        const st = store.update((s) => {
+          s.feishu.appSecret = cred.appSecret!;
+        });
+        broadcast('state:changed', st);
+        broadcast('feishuGuide:credentialCaptured', { appSecret: cred.appSecret });
+      }
+    }
+  });
   controlServer = new ControlServer(
     store,
     runner,
@@ -3036,6 +3237,7 @@ app.on('before-quit', () => {
     feishuPopupWin.destroy();
     feishuPopupWin = null;
   }
+  feishuSpotlight?.detach();
   localBrowser?.destroyAll();
   tunnel?.stop();
   feishu?.disconnect();
